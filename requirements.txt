@@ -1,3 +1,6 @@
 pandas
 jupyter==1.*
 plotly
+ipykernel
+requests
+streamlit
