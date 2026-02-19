@@ -3,4 +3,4 @@ jupyter==1.*
 plotly
 ipykernel
 requests
-streamlit
+streamlit>=1.36.0
