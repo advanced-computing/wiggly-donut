@@ -3,7 +3,7 @@ import streamlit as st
 st.set_page_config(page_title="Prediction Markets Dashboard", layout="wide")
 
 st.title("📊 Prediction Markets Dashboard")
-st.write("Polymarket + Kalshi (elections).")
+st.write("A Cross-Market Prediction Basket for the most impactful news stories")
 
 st.header("wiggly-donut")
 st.write("""
