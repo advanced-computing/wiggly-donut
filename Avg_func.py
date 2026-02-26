@@ -15,12 +15,15 @@ def average_probabilities(poly: pd.DataFrame, kalshi: pd.DataFrame) -> pd.DataFr
     -------
     DataFrame with columns ``Date`` (date) and ``Average (%)`` (float, 0–100)
     """
+    if len(poly) == 0 or len(kalshi) == 0:
+        return pd.DataFrame(columns=["Date", "Average (%)"])
+
     poly = poly[["t", "p"]].copy()
-    poly["Date"] = poly["t"].dt.normalize()
+    poly["Date"] = pd.to_datetime(poly["t"]).dt.normalize()
     poly = poly.groupby("Date", as_index=False)["p"].mean().rename(columns={"p": "polymarket"})
 
     kalshi = kalshi[["Date", "Close (¢)"]].copy()
-    kalshi["Date"] = kalshi["Date"].dt.normalize()
+    kalshi["Date"] = pd.to_datetime(kalshi["Date"]).dt.normalize()
     kalshi = kalshi.groupby("Date", as_index=False)["Close (¢)"].mean().rename(columns={"Close (¢)": "kalshi"})
 
     merged = poly.merge(kalshi, on="Date", how="inner")

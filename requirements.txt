@@ -4,3 +4,4 @@ plotly
 ipykernel
 requests
 streamlit>=1.36.0
+pytest>=7.0.0
