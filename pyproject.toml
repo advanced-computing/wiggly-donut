@@ -1,3 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = "."
+
 # https://coverage.readthedocs.io/en/latest/config.html
 [tool.coverage.run]
 # some workarounds for source and test files being intermingled, not all using modules, etc.
