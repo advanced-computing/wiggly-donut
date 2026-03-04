@@ -1,12 +1,12 @@
 """Unit tests for Avg_func.average_probabilities."""
-import pandas as pd
-import pytest
 from datetime import datetime
+
+import pandas as pd
 
 from Avg_func import average_probabilities
 
 
-# A polymarket/kalshi type DataFrame for tests. 
+# A polymarket/kalshi type DataFrame for tests.
 def _make_poly(timestamps, probabilities):
     """Helper: DataFrame with columns t (datetime), p (float 0-100)."""
     return pd.DataFrame({"t": timestamps, "p": probabilities})
@@ -17,7 +17,7 @@ def _make_kalshi(dates, close_cents):
     return pd.DataFrame({"Date": dates, "Close (¢)": close_cents})
 
 
-# Tests 
+# Tests
 
 # Test 1: one date in both sources = one row with the correct average
 def test_single_overlapping_day():
