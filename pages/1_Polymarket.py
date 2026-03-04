@@ -1,8 +1,9 @@
-import streamlit as st
-import requests
-import pandas as pd
 import json
+
+import pandas as pd
 import plotly.express as px
+import requests
+import streamlit as st
 
 st.title("Polymarket (live)")
 slug = "khamenei-out-as-supreme-leader-of-iran-by-march-31"
@@ -14,7 +15,7 @@ token_id = json.loads(market["clobTokenIds"])[0]
 
 # feth the full price history for the "Yes" tokens
 history = requests.get(
-    f"https://clob.polymarket.com/prices-history",
+    "https://clob.polymarket.com/prices-history",
     params={"market": token_id, "interval": "max", "fidelity": 1440},
 ).json()
 
