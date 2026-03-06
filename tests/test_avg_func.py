@@ -27,7 +27,8 @@ def test_single_overlapping_day():
     result = average_probabilities(poly, kalshi)
     assert result is not None
     assert len(result) == 1
-    assert result["Average (%)"].iloc[0] == 50.0
+    EXPECTED_AVG = 50.0
+    assert result["Average (%)"].iloc[0] == EXPECTED_AVG
 
 # Test 2: when polymarket has no data -->  function  returns empty result, not crash.
 def test_empty_poly():
