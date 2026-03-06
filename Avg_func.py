@@ -24,7 +24,8 @@ def average_probabilities(poly: pd.DataFrame, kalshi: pd.DataFrame) -> pd.DataFr
 
     kalshi = kalshi[["Date", "Close (¢)"]].copy()
     kalshi["Date"] = pd.to_datetime(kalshi["Date"]).dt.normalize()
-    kalshi = kalshi.groupby("Date", as_index=False)["Close (¢)"].mean().rename(columns={"Close (¢)": "kalshi"})
+    kalshi = kalshi.groupby("Date", as_index=False)["Close (¢)"].mean()
+    kalshi = kalshi.rename(columns={"Close (¢)": "kalshi"})
 
     merged = poly.merge(kalshi, on="Date", how="inner")
     merged["Average (%)"] = (merged["polymarket"] + merged["kalshi"]) / 2

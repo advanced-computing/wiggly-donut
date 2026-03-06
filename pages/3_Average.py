@@ -1,11 +1,12 @@
-import streamlit as st
-import requests
-import pandas as pd
 import json
-import plotly.express as px
-from datetime import datetime
-import sys
 import os
+import sys
+from datetime import datetime
+
+import pandas as pd
+import plotly.express as px
+import requests
+import streamlit as st
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from Avg_func import average_probabilities

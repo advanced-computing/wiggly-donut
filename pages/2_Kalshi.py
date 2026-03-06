@@ -1,8 +1,9 @@
-import streamlit as st
-import requests
+from datetime import datetime
+
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
+import requests
+import streamlit as st
 
 st.title("Kalshi (live)")
 start_ts = int(datetime(2026, 1, 9).timestamp())
