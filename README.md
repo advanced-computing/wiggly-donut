@@ -46,14 +46,7 @@ Relevant headlines pulled from NewsAPI (title, source, timestamp, link), using t
 
 
 ## 5) What are your known unknowns?
-Matching across platforms: there’s no guarantee Kalshi/Polymarket list the same questions. Similar problem for the NewsAPI – how do we get news reports for associated questions. This might be the hardest bit.
-
-API rate limits: It seems like all three APIs have free tiers – but we need to read in-depth on their limitations.
-
-Database-related concerns: Might need to set up a database to do the weeklong basket tracking. Unsure how this works.
-
+Through our retrospective, we found that our initial API tests were successful: both the Kalshi and Polymarket APIs worked properly, and we successfully implemented the average probability function across the two platforms. However, we have two primary known unknowns we still need to address. First, we need to finalize our matching strategy for connecting news articles to specific prediction markets. Second, there are hosting-related concerns; we are unsure whether we would need to set up cron jobs to keep the newsfeed updated, or if Streamlit is the right platform to allow for constant background computation.
 
 ## 6) What challenges do you anticipate?
-Honestly a lot of unknown unknowns – like setting up the database
-
-UX/UI might be a problem too – need to figure out whether the dashboard described above is the best way to show the most relevant news articles.
+A major challenge we anticipate revolves around API rate limits. We still need to incorporate and fully understand the News API's rate limits under real-world usage. Furthermore, rather than simply relying on RegEx or a basic keyword matching strategy, we anticipate that achieving true semantic matching between news topics and prediction markets will be a significant technical hurdle.
