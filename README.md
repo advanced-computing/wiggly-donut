@@ -68,13 +68,28 @@ a. Visit Google Cloud Consolr, select or create a project, then navigate to **IA
 b. Create a new Service Account and grant it the **BigQuery Data Editor** and **BigQuery Job User** roles so it can read, write, and execute BigQuery jobs.
 c. Click on the newly created Service Account, go to the **Keys** tab, click **Add Key**, and choose **JSON**. Download the key file to your machine.
 
-Once you have the JSON key, create a `.streamlit` folder and a `secrets.toml` file inside your project directory:
+Once you have the JSON key, you need to add it to your Streamlit secrets. Create a `.streamlit` folder and a `secrets.toml` file inside your project directory:
 ```bash
 mkdir .streamlit
 touch .streamlit/secrets.toml
 ```
 
-Open `.streamlit/secrets.toml` and paste it in there. 
+Open `.streamlit/secrets.toml` and add a `[gcp_service_account]` section. Convert the key-value pairs from your JSON file into TOML format. It should look like this:
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\nYOUR\nPRIVATE\nKEY\nHERE\n-----END PRIVATE KEY-----\n"
+client_email = "your-service-account-email"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "your-cert-url"
+universe_domain = "googleapis.com"
+```
 
 **3. Populate Your BigQuery Database**
 Before running the dashboard, fetch the latest probabilities from Polymarket and upload them into your BigQuery dataset.
