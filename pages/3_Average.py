@@ -7,6 +7,8 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+from google.oauth2.service_account import Credentials
+import pandas_gbq
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from Avg_func import average_probabilities
@@ -14,19 +16,15 @@ from Avg_func import average_probabilities
 st.title("Average Probability (Polymarket + Kalshi)")
 
 # --- Polymarket ---
-slug = "khamenei-out-as-supreme-leader-of-iran-by-march-31"
-event = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}").json()[0]
-market = event["markets"][0]
-token_id = json.loads(market["clobTokenIds"])[0]
+@st.cache_data(ttl=600)
+def load_poly_data():
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    query = "SELECT * FROM `aerial-reef-486622-t2.2444_n.polymarket_khamenei` ORDER BY date"
+    df = pandas_gbq.read_gbq(query, project_id="aerial-reef-486622-t2", credentials=creds)
+    df = df.rename(columns={"date": "t", "yes_price": "p"})
+    return df
 
-history = requests.get(
-    "https://clob.polymarket.com/prices-history",
-    params={"market": token_id, "interval": "max", "fidelity": 1440},
-).json()
-
-df_poly = pd.DataFrame(history["history"])
-df_poly["t"] = pd.to_datetime(df_poly["t"], unit="s")
-df_poly["p"] = df_poly["p"].astype(float) * 100
+df_poly = load_poly_data()
 
 # --- Kalshi ---
 start_ts = int(datetime(2026, 1, 9).timestamp())

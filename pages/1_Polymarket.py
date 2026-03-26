@@ -1,33 +1,25 @@
-import json
-
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
+from google.oauth2.service_account import Credentials
+import pandas_gbq
 
-st.title("Polymarket (live)")
-slug = "khamenei-out-as-supreme-leader-of-iran-by-march-31"
+st.title("Polymarket (from BigQuery)")
 
-# gamma API returns a list, so we grab [0], each event has multiple markets too
-event = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}").json()[0]
-market = event["markets"][0]
-token_id = json.loads(market["clobTokenIds"])[0]
+@st.cache_data(ttl=600)
+def load_data():
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    query = "SELECT * FROM `aerial-reef-486622-t2.2444_n.polymarket_khamenei` ORDER BY date"
+    df = pandas_gbq.read_gbq(query, project_id="aerial-reef-486622-t2", credentials=creds)
+    df = df.rename(columns={"date": "t", "yes_price": "p"})
+    return df
 
-# feth the full price history for the "Yes" tokens
-history = requests.get(
-    "https://clob.polymarket.com/prices-history",
-    params={"market": token_id, "interval": "max", "fidelity": 1440},
-).json()
-
-# build df from the history; each entry has "t" and "p" (price 0–1)
-df_hist = pd.DataFrame(history["history"])
-df_hist["t"] = pd.to_datetime(df_hist["t"], unit="s")
-df_hist["p"] = df_hist["p"].astype(float) * 100
+df_hist = load_data()
 
 # create line chart of price over time
 fig = px.line(
     df_hist, x="t", y="p",
-    title=event["title"],
+    title="Khamenei Out Before April 1 — Daily Yes Price",
     labels={"t": "Date", "p": "Yes Price (%)"},
 )
 fig.update_layout(yaxis_range=[0, 100])
