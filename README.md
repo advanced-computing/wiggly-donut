@@ -50,3 +50,44 @@ Through our retrospective, we found that our initial API tests were successful: 
 
 ## 6) What challenges do you anticipate?
 A major challenge we anticipate revolves around API rate limits. We still need to incorporate and fully understand the News API's rate limits under real-world usage. Furthermore, rather than simply relying on RegEx or a basic keyword matching strategy, we anticipate that achieving true semantic matching between news topics and prediction markets will be a significant technical hurdle.
+
+## Quickstart Guide
+
+Follow these steps to set up the application. 
+
+**1. Clone and Install**
+```bash
+git clone https://github.com/nav-v/adv-comp-project.git
+cd adv-comp-project
+pip install -r requirements.txt
+```
+**2. Set up Google Cloud Authn**
+You need to get a GCP service account credentials so Streamlit can connect to BigQuery. To do this:
+
+a. Visit Google Cloud Consolr, select or create a project, then navigate to **IAM & Admin** > **Service Accounts**.
+b. Create a new Service Account and grant it the **BigQuery Data Editor** and **BigQuery Job User** roles so it can read, write, and execute BigQuery jobs.
+c. Click on the newly created Service Account, go to the **Keys** tab, click **Add Key**, and choose **JSON**. Download the key file to your machine.
+
+Once you have the JSON key, create a `.streamlit` folder and a `secrets.toml` file inside your project directory:
+```bash
+mkdir .streamlit
+touch .streamlit/secrets.toml
+```
+
+Open `.streamlit/secrets.toml` and paste it in there. 
+
+**3. Populate Your BigQuery Database**
+Before running the dashboard, fetch the latest probabilities from Polymarket and upload them into your BigQuery dataset.
+
+* Open `load_bq.py` and modify `PROJECT_ID`, `DATASET_ID`, and `TABLE_NAME` at the top of the file to match your GCP project destination.
+* Run the script to ingest current Polymarket odds into BigQuery:
+```bash
+python load_bq.py
+```
+
+**4. Launch the Streamlit Dashboard**
+Now that the data is loaded into BigQuery, start:
+```bash
+streamlit run streamlit_app.py
+```
+A browser tab will open automatically at `http://localhost:8501`.
