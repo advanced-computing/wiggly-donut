@@ -19,8 +19,8 @@ st.title("Average Probability (Polymarket + Kalshi)")
 @st.cache_data(ttl=600)
 def load_poly_data():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-    query = "SELECT * FROM `aerial-reef-486622-t2.2444_n.polymarket_khamenei` ORDER BY date"
-    df = pandas_gbq.read_gbq(query, project_id="aerial-reef-486622-t2", credentials=creds)
+    query = "SELECT * FROM `sipa-adv-c-wiggly-donut.2444_n.polymarket_khamenei` ORDER BY date"
+    df = pandas_gbq.read_gbq(query, project_id="sipa-adv-c-wiggly-donut", credentials=creds)
     df = df.rename(columns={"date": "t", "yes_price": "p"})
     return df
 
@@ -39,7 +39,7 @@ df_kalshi = pd.DataFrame(
     [
         {
             "Date": datetime.fromtimestamp(c["end_period_ts"]),
-            "Close (¢)": c["price"]["close"],
+            "Close (¢)": float(c["price"]["close_dollars"]) * 100,
         }
         for c in candles["candlesticks"]
     ]

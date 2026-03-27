@@ -17,7 +17,7 @@ candles = requests.get(
 
 # build df from the candlestick data
 df_hist = pd.DataFrame([
-    {"Date": datetime.fromtimestamp(c["end_period_ts"]), "Close (¢)": c["price"]["close"]}
+    {"Date": datetime.fromtimestamp(c["end_period_ts"]), "Close (¢)": float(c["price"]["close_dollars"]) * 100}
     for c in candles["candlesticks"]
 ])
 
