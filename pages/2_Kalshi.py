@@ -1,27 +1,29 @@
-from datetime import datetime
+import time
 
-import pandas as pd
+import pandas_gbq
 import plotly.express as px
-import requests
 import streamlit as st
+from google.oauth2.service_account import Credentials
 
-st.title("Kalshi (live)")
-start_ts = int(datetime(2026, 1, 9).timestamp())
-end_ts = int(datetime.now().timestamp())
+start_time = time.time()
 
-# each candlestick covers 1 day (1440 minutes)
-candles = requests.get(
-    "https://api.elections.kalshi.com/trade-api/v2/series/KXKHAMENEIOUT/markets/KXKHAMENEIOUT-AKHA-26APR01/candlesticks",
-    params={"period_interval": 1440, "start_ts": start_ts, "end_ts": end_ts},
-).json()
+st.title("Kalshi (from BigQuery)")
 
-# build df from the candlestick data
-df_hist = pd.DataFrame([
-    {"Date": datetime.fromtimestamp(c["end_period_ts"]), "Close (¢)": float(c["price"]["close_dollars"]) * 100}
-    for c in candles["candlesticks"]
-])
 
-# create line chart of price over time
+@st.cache_data(ttl=600)
+def load_data():
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    query = """
+        SELECT date, close_cents
+        FROM `sipa-adv-c-wiggly-donut.2444_n.kalshi_khamenei`
+        ORDER BY date
+    """
+    df = pandas_gbq.read_gbq(query, project_id="sipa-adv-c-wiggly-donut", credentials=creds)
+    return df.rename(columns={"date": "Date", "close_cents": "Close (¢)"})
+
+
+df_hist = load_data()
+
 fig = px.line(
     df_hist, x="Date", y="Close (¢)",
     title="Khamenei Out Before April 1 — Daily Close Price",
@@ -30,7 +32,5 @@ fig = px.line(
 fig.update_layout(yaxis_range=[0, 100])
 st.plotly_chart(fig, use_container_width=True)
 
-data = requests.get(
-    "https://api.elections.kalshi.com/trade-api/v2/markets",
-    params={"series_ticker": "KXKHAMENEIOUT"},
-).json()
+elapsed = time.time() - start_time
+st.caption(f"Page loaded in {elapsed:.2f} seconds")

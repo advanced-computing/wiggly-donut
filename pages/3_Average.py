@@ -1,51 +1,44 @@
-import json
 import os
 import sys
-from datetime import datetime
+import time
 
-import pandas as pd
+import pandas_gbq
 import plotly.express as px
-import requests
 import streamlit as st
 from google.oauth2.service_account import Credentials
-import pandas_gbq
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from Avg_func import average_probabilities
 
+start_time = time.time()
+
 st.title("Average Probability (Polymarket + Kalshi)")
 
-# --- Polymarket ---
+
 @st.cache_data(ttl=600)
-def load_poly_data():
+def load_both():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-    query = "SELECT * FROM `sipa-adv-c-wiggly-donut.2444_n.polymarket_khamenei` ORDER BY date"
-    df = pandas_gbq.read_gbq(query, project_id="sipa-adv-c-wiggly-donut", credentials=creds)
-    df = df.rename(columns={"date": "t", "yes_price": "p"})
-    return df
 
-df_poly = load_poly_data()
+    t0 = time.time()
+    df_poly = pandas_gbq.read_gbq(
+        "SELECT date, yes_price FROM `sipa-adv-c-wiggly-donut.2444_n.polymarket_khamenei` ORDER BY date",
+        project_id="sipa-adv-c-wiggly-donut",
+        credentials=creds,
+    ).rename(columns={"date": "t", "yes_price": "p"})
+    t1 = time.time()
 
-# --- Kalshi ---
-start_ts = int(datetime(2026, 1, 9).timestamp())
-end_ts = int(datetime.now().timestamp())
+    df_kalshi = pandas_gbq.read_gbq(
+        "SELECT date, close_cents FROM `sipa-adv-c-wiggly-donut.2444_n.kalshi_khamenei` ORDER BY date",
+        project_id="sipa-adv-c-wiggly-donut",
+        credentials=creds,
+    ).rename(columns={"date": "Date", "close_cents": "Close (¢)"})
+    t2 = time.time()
 
-candles = requests.get(
-    "https://api.elections.kalshi.com/trade-api/v2/series/KXKHAMENEIOUT/markets/KXKHAMENEIOUT-AKHA-26APR01/candlesticks",
-    params={"period_interval": 1440, "start_ts": start_ts, "end_ts": end_ts},
-).json()
+    return df_poly, df_kalshi, t1 - t0, t2 - t1
 
-df_kalshi = pd.DataFrame(
-    [
-        {
-            "Date": datetime.fromtimestamp(c["end_period_ts"]),
-            "Close (¢)": float(c["price"]["close_dollars"]) * 100,
-        }
-        for c in candles["candlesticks"]
-    ]
-)
 
-# --- Average ---
+df_poly, df_kalshi, poly_load_s, kalshi_load_s = load_both()
+
 avg = average_probabilities(df_poly, df_kalshi)
 
 fig = px.line(
@@ -59,3 +52,9 @@ fig.update_layout(yaxis_range=[0, 100])
 st.plotly_chart(fig, use_container_width=True)
 
 st.dataframe(avg)
+
+elapsed = time.time() - start_time
+st.caption(
+    f"Page loaded in {elapsed:.2f} seconds "
+    f"(Polymarket BQ: {poly_load_s:.2f}s, Kalshi BQ: {kalshi_load_s:.2f}s)"
+)

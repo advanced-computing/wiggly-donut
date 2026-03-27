@@ -1,16 +1,18 @@
 import json
-import pandas as pd
-import requests
-import pandas_gbq
+from datetime import datetime
 
-# TODO: Fill in your GCP Project ID and Dataset Name
+import pandas as pd
+import pandas_gbq
+import requests
+
 PROJECT_ID = "sipa-adv-c-wiggly-donut"
 DATASET_ID = "2444_n"
-TABLE_NAME = "polymarket_khamenei"
+TABLE_NAME_POLY = "polymarket_khamenei"
+TABLE_NAME_KALSHI = "kalshi_khamenei"
 
 
 def get_polymarket_data():
-    """Pulls data from the Polymarket API and cleans it."""
+    """Pulls full price history from the Polymarket API."""
     print("Fetching data from Polymarket API...")
     slug = "khamenei-out-as-supreme-leader-of-iran-by-march-31"
 
@@ -27,27 +29,44 @@ def get_polymarket_data():
     ).json()
 
     # build df from the history; each entry has "t" and "p" (price 0–1)
-    df_hist = pd.DataFrame(history["history"])
-    df_hist["t"] = pd.to_datetime(df_hist["t"], unit="s")
-    df_hist["p"] = df_hist["p"].astype(float) * 100
+    df = pd.DataFrame(history["history"])
+    df["t"] = pd.to_datetime(df["t"], unit="s")
+    df["p"] = df["p"].astype(float) * 100
 
     # Rename columns to be more descriptive for a database
-    df_hist = df_hist.rename(columns={"t": "date", "p": "yes_price"})
-    return df_hist
+    df = df.rename(columns={"t": "date", "p": "yes_price"})
+    return df
+
+
+def get_kalshi_data():
+    """Pulls full candlestick history from the Kalshi API."""
+    print("Fetching data from Kalshi API...")
+    start_ts = int(datetime(2026, 1, 9).timestamp())
+    end_ts = int(datetime.now().timestamp())
+
+    response = requests.get(
+        "https://api.elections.kalshi.com/trade-api/v2/series/KXKHAMENEIOUT"
+        "/markets/KXKHAMENEIOUT-AKHA-26APR01/candlesticks",
+        params={"period_interval": 1440, "start_ts": start_ts, "end_ts": end_ts},
+    )
+    candles = response.json()
+
+    df = pd.DataFrame([
+        {
+            "date": datetime.fromtimestamp(c["end_period_ts"]),
+            "close_cents": float(c["price"]["close_dollars"]) * 100,
+        }
+        for c in candles["candlesticks"]
+    ])
+    return df
 
 
 def load_data_to_bq(df, project_id, dataset_id, table_name):
-    """Copies the dataframe to BigQuery."""
-    # The destination table requires dataset.table format
+    """Copies the dataframe to BigQuery, replacing the existing table."""
     destination_table = f"{dataset_id}.{table_name}"
-
     print(f"Uploading {len(df)} rows to {destination_table}...")
-
-    # pandas-gbq handles authenticating with your local user account automatically
-    # when you run it from the console.
-    # We use if_exists="replace" as the 'appropriate technique' here because the
-    # Polymarket API gives us the *entire* historical dataset in one go.
-    # It will automatically create the table if it does not exist.
+    # We use if_exists="replace" because both APIs return the full historical
+    # dataset in one call, so a full replace is the correct strategy.
     pandas_gbq.to_gbq(
         df,
         destination_table=destination_table,
@@ -58,8 +77,8 @@ def load_data_to_bq(df, project_id, dataset_id, table_name):
 
 
 if __name__ == "__main__":
-    if PROJECT_ID == "YOUR_GCP_PROJECT_ID":
-        print("Please edit load_bq.py and fill in your PROJECT_ID and DATASET_ID!")
-    else:
-        df = get_polymarket_data()
-        load_data_to_bq(df, PROJECT_ID, DATASET_ID, TABLE_NAME)
+    df_poly = get_polymarket_data()
+    load_data_to_bq(df_poly, PROJECT_ID, DATASET_ID, TABLE_NAME_POLY)
+
+    df_kalshi = get_kalshi_data()
+    load_data_to_bq(df_kalshi, PROJECT_ID, DATASET_ID, TABLE_NAME_KALSHI)

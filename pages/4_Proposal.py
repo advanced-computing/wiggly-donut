@@ -1,5 +1,9 @@
-import streamlit as st
 import os
+import time
+
+import streamlit as st
+
+start_time = time.time()
 
 st.set_page_config(page_title="Proposal", layout="wide")
 
@@ -15,3 +19,6 @@ if os.path.exists(readme_path):
     st.markdown(readme_content)
 else:
     st.error("README.md not found.")
+
+elapsed = time.time() - start_time
+st.caption(f"Page loaded in {elapsed:.2f} seconds")
