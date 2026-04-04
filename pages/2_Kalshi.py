@@ -15,7 +15,9 @@ st.title("Kalshi (from BigQuery)")
 df = load_kalshi()
 
 fig = px.line(
-    df, x="Date", y="Close (¢)",
+    df,
+    x="Date",
+    y="Close (¢)",
     title="Khamenei Out Before April 1 — Daily Close Price",
     labels={"Close (¢)": "Yes Price (¢)"},
 )

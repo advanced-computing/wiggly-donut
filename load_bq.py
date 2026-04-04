@@ -51,13 +51,15 @@ def get_kalshi_data():
     )
     candles = response.json()
 
-    df = pd.DataFrame([
-        {
-            "date": datetime.fromtimestamp(c["end_period_ts"]),
-            "close_cents": float(c["price"]["close_dollars"]) * 100,
-        }
-        for c in candles["candlesticks"]
-    ])
+    df = pd.DataFrame(
+        [
+            {
+                "date": datetime.fromtimestamp(c["end_period_ts"]),
+                "close_cents": float(c["price"]["close_dollars"]) * 100,
+            }
+            for c in candles["candlesticks"]
+        ]
+    )
     return df
 
 

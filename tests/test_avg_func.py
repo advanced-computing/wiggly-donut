@@ -1,4 +1,5 @@
 """Unit tests for Avg_func.average_probabilities."""
+
 from datetime import datetime
 
 import pandas as pd
@@ -19,6 +20,7 @@ def _make_kalshi(dates, close_cents):
 
 # Tests
 
+
 # Test 1: one date in both sources = one row with the correct average
 def test_single_overlapping_day():
     base = datetime(2026, 2, 1)
@@ -30,6 +32,7 @@ def test_single_overlapping_day():
     expected_avg = 50.0
     assert result["Average (%)"].iloc[0] == expected_avg
 
+
 # Test 2: when polymarket has no data -->  function  returns empty result, not crash.
 def test_empty_poly():
     base = datetime(2026, 2, 1)
@@ -40,6 +43,7 @@ def test_empty_poly():
     assert len(result) == 0
     assert list(result.columns) == ["Date", "Average (%)"]
 
+
 # Test 3: when kalshi has no data -->  function  returns empty result, not crash
 def test_empty_kalshi():
     base = datetime(2026, 2, 1)
@@ -49,6 +53,7 @@ def test_empty_kalshi():
     assert result is not None
     assert len(result) == 0
 
+
 # Test 4: only dates that appear in both sources should be in the result
 def test_no_overlapping_dates():
     poly = _make_poly([datetime(2026, 2, 1)], [50.0])
@@ -57,7 +62,8 @@ def test_no_overlapping_dates():
     assert result is not None
     assert len(result) == 0
 
-#Test 5: output must have exactly two columns.
+
+# Test 5: output must have exactly two columns.
 def test_output_format():
     base = datetime(2026, 2, 1)
     poly = _make_poly([base], [50.0])
@@ -65,5 +71,3 @@ def test_output_format():
     result = average_probabilities(poly, kalshi)
     assert result is not None
     assert list(result.columns) == ["Date", "Average (%)"]
-
-

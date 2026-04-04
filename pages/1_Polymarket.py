@@ -15,7 +15,9 @@ st.title("Polymarket (from BigQuery)")
 df = load_polymarket()
 
 fig = px.line(
-    df, x="t", y="p",
+    df,
+    x="t",
+    y="p",
     title="Khamenei Out Before April 1 — Daily Yes Price",
     labels={"t": "Date", "p": "Yes Price (%)"},
 )
