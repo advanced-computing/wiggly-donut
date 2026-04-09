@@ -14,7 +14,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 readme_path = os.path.join(os.path.dirname(current_dir), "README.md")
 
 if os.path.exists(readme_path):
-    with open(readme_path, "r", encoding="utf-8") as f:
+    with open(readme_path, encoding="utf-8") as f:
         readme_content = f.read()
     st.markdown(readme_content)
 else:
