@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 .streamlit/secrets.toml
 secrets.toml
+*.json
+!package.json
+!package-lock.json

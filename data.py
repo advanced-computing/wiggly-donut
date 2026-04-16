@@ -2,6 +2,7 @@ import pandas as pd
 import pandas_gbq
 import streamlit as st
 from google.oauth2.service_account import Credentials
+from typing import Optional
 
 PROJECT_ID = "sipa-adv-c-wiggly-donut"
 DATASET_ID = "2444_n"
@@ -86,7 +87,7 @@ def load_story_baskets() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600)
-def load_selected_matches(source: str | None = None) -> pd.DataFrame:
+def load_selected_matches(source: Optional[str] = None) -> pd.DataFrame:
     source_clause = ""
     if source in {"polymarket", "kalshi"}:
         source_clause = f"AND source = '{source}'"
