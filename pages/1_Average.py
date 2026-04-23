@@ -5,6 +5,7 @@ import time
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from data import load_recent_selected_matches, load_selected_matches, load_story_baskets
@@ -39,7 +40,7 @@ def _sort_baskets(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _build_history_chart(story_matches: pd.DataFrame, recent_matches: pd.DataFrame) -> go.Figure | None:
+def _build_history_chart(story_matches: pd.DataFrame, recent_matches: pd.DataFrame) -> Optional[go.Figure]:
     market_keys = {
         (row["source"], row["market_id"])
         for row in story_matches.to_dict("records")
@@ -156,7 +157,7 @@ for _, story in baskets.iterrows():
         story_matches = matches[matches["snapshot_story_id"] == story["snapshot_story_id"]]
         fig = _build_history_chart(story_matches, recent_matches)
         if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"chart_{story['snapshot_story_id']}")
         else:
             st.info("Not enough stored history yet to draw the 3-day market chart.")
 
