@@ -13,6 +13,9 @@ import toml
 from google import genai
 from google.oauth2.service_account import Credentials
 
+HTTP_TOO_MANY_REQUESTS = 429
+PLATFORMS_FOR_COMPLETE_BASKET = 2
+
 PROJECT_ID = "sipa-adv-c-wiggly-donut"
 DATASET_ID = "2444_n"
 TABLE_NAME_HEADLINES = "daily_headlines"
@@ -400,7 +403,7 @@ def _kalshi_paginate(path: str, params: dict, max_pages: int = 15) -> list[dict]
         backoff = 1.0
         for attempt in range(6):
             resp = requests.get(url, params=page_params, timeout=30)
-            if resp.status_code == 429:
+            if resp.status_code == HTTP_TOO_MANY_REQUESTS:
                 retry_after = float(resp.headers.get("Retry-After", backoff))
                 print(f"  Kalshi 429; sleeping {retry_after:.1f}s (attempt {attempt + 1})")
                 _time.sleep(retry_after)
@@ -926,7 +929,7 @@ def build_story_baskets(
                 ),
                 "matched_platform_count": len(current_prices),
                 "change_platform_count": len(previous_platform_prices),
-                "complete_basket": len(current_prices) == 2,
+                "complete_basket": len(current_prices) == PLATFORMS_FOR_COMPLETE_BASKET,
                 "basket_yes_price": basket_yes_price,
                 "basket_prev_yes_price": basket_prev_yes_price,
                 "basket_change_1d": basket_change,
@@ -1068,7 +1071,7 @@ def fetch_kalshi_history(series_ticker: str, market_ticker: str, days: int) -> d
             params={"start_ts": start_ts, "end_ts": now, "period_interval": 1440},
             timeout=20,
         )
-        if r.status_code == 429:
+        if r.status_code == HTTP_TOO_MANY_REQUESTS:
             import time as _t
             _t.sleep(2)
             r = requests.get(

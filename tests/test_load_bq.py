@@ -8,6 +8,11 @@ from load_bq import (
     build_story_baskets,
 )
 
+EXPECTED_BASKET_YES_PRICE = 60.0
+EXPECTED_BASKET_PREV_PRICE = 55.0
+EXPECTED_BASKET_CHANGE = 5.0
+EXPECTED_BASKET_YES_PRICE_NO_PREV = 48.0
+
 
 def test_build_story_baskets_uses_previous_selected_prices():
     headlines = pd.DataFrame(
@@ -62,9 +67,9 @@ def test_build_story_baskets_uses_previous_selected_prices():
     )
 
     assert len(baskets) == 1
-    assert baskets.loc[0, "basket_yes_price"] == 60.0
-    assert baskets.loc[0, "basket_prev_yes_price"] == 55.0
-    assert baskets.loc[0, "basket_change_1d"] == 5.0
+    assert baskets.loc[0, "basket_yes_price"] == EXPECTED_BASKET_YES_PRICE
+    assert baskets.loc[0, "basket_prev_yes_price"] == EXPECTED_BASKET_PREV_PRICE
+    assert baskets.loc[0, "basket_change_1d"] == EXPECTED_BASKET_CHANGE
 
 
 def test_build_story_baskets_handles_missing_previous_prices():
@@ -105,7 +110,7 @@ def test_build_story_baskets_handles_missing_previous_prices():
     )
 
     assert len(baskets) == 1
-    assert baskets.loc[0, "basket_yes_price"] == 48.0
+    assert baskets.loc[0, "basket_yes_price"] == EXPECTED_BASKET_YES_PRICE_NO_PREV
     assert pd.isna(baskets.loc[0, "basket_change_1d"])
 
 

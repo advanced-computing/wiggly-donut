@@ -12,6 +12,8 @@ from data import load_recent_selected_matches, load_selected_matches, load_story
 
 LOOKBACK_SNAPSHOTS = 7
 TRENDING_TOP_N = 8
+TITLE_TRUNCATE_LEN = 55
+MIN_PLATFORMS_PAIRED = 2
 
 st.set_page_config(page_title="Daily News Basket", layout="wide")
 
@@ -54,10 +56,12 @@ def _build_trending_chart(baskets: pd.DataFrame, recent_matches: pd.DataFrame) -
     label_order: list[str] = []
     for rank, story in enumerate(top.itertuples(index=False), start=1):
         title = str(story.title)
-        title_short = title[:55] + ("..." if len(title) > 55 else "")
+        suffix = "..." if len(title) > TITLE_TRUNCATE_LEN else ""
+        title_short = title[:TITLE_TRUNCATE_LEN] + suffix
         change_pp = pd.to_numeric(pd.Series([story.basket_change_1d]), errors="coerce").iloc[0]
         change_str = f"{change_pp:+.1f}pp" if pd.notna(change_pp) else "n/a"
-        paired_marker = "🤝 " if int(getattr(story, "matched_platform_count", 0) or 0) >= 2 else ""
+        platform_count = int(getattr(story, "matched_platform_count", 0) or 0)
+        paired_marker = "🤝 " if platform_count >= MIN_PLATFORMS_PAIRED else ""
         label = f"#{rank}  {change_str}  {paired_marker}{title_short}"
         label_order.append(label)
         for source_field, market_field in (
@@ -237,7 +241,7 @@ st.divider()
 def _render_card(story: pd.Series, *, key_prefix: str) -> None:
     with st.container(border=True):
         title = str(story["title"])
-        is_paired = int(story.get("matched_platform_count") or 0) >= 2
+        is_paired = int(story.get("matched_platform_count") or 0) >= MIN_PLATFORMS_PAIRED
         prefix = "🤝 " if is_paired else ""
         if story.get("url"):
             st.markdown(f"#### {prefix}[{title}]({story['url']})")
@@ -294,7 +298,7 @@ def _render_card_grid(rows: pd.DataFrame, *, key_prefix: str, cols_per_row: int 
 # === Top movers panel: 15 highest volume-weighted movers ===
 TOP_N = 15
 top_movers = baskets.head(TOP_N)
-n_paired = int((top_movers["matched_platform_count"] >= 2).sum())
+n_paired = int((top_movers["matched_platform_count"] >= MIN_PLATFORMS_PAIRED).sum())
 st.subheader(f"📈 Top {len(top_movers)} stories with most movement")
 st.caption(
     f"Latest stored snapshot: **{snapshot_date}**. "
