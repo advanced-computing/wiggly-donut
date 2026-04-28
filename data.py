@@ -1,9 +1,14 @@
 
+
+import os
+
 import pandas as pd
 import pandas_gbq
+import requests
 import streamlit as st
 from google.oauth2.service_account import Credentials
-from typing import Optional
+
+NEWS_API_BASE = "https://newsapi.org/v2/top-headlines"
 
 PROJECT_ID = "sipa-adv-c-wiggly-donut"
 DATASET_ID = "2444_n"
@@ -23,6 +28,8 @@ BASKET_NUMERIC_COLUMNS = [
     "basket_yes_price",
     "basket_prev_yes_price",
     "basket_change_1d",
+    "basket_volume_24h",
+    "basket_score",
     "rank_by_abs_change",
 ]
 MATCH_NUMERIC_COLUMNS = [
@@ -88,7 +95,7 @@ def load_story_baskets() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600)
-def load_selected_matches(source: Optional[str] = None) -> pd.DataFrame:
+def load_selected_matches(source: str | None = None) -> pd.DataFrame:
     source_clause = ""
     if source in {"polymarket", "kalshi"}:
         source_clause = f"AND source = '{source}'"
@@ -118,6 +125,54 @@ def load_selected_matches(source: Optional[str] = None) -> pd.DataFrame:
         if "event_date" in df.columns:
             df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce").dt.date
         df = _coerce_numeric_columns(df, MATCH_NUMERIC_COLUMNS)
+    return df
+
+
+def _get_news_api_key() -> str | None:
+    if os.getenv("NEWSAPI_API_KEY"):
+        return os.environ["NEWSAPI_API_KEY"]
+    try:
+        section = st.secrets.get("newsapi", {})
+        return section.get("api_key") or section.get("api_token")
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600)
+def fetch_newsapi_top(country: str = "us", limit: int = 30) -> pd.DataFrame:
+    """Pull top editorial headlines from NewsAPI's top-headlines endpoint.
+
+    Used as the editorial baseline against which the market-trending dashboard
+    is compared. Returns an empty DataFrame if no API key is configured.
+    """
+    key = _get_news_api_key()
+    if not key:
+        return pd.DataFrame()
+
+    resp = requests.get(
+        NEWS_API_BASE,
+        params={"country": country, "pageSize": limit},
+        headers={"X-Api-Key": key},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    articles = resp.json().get("articles", []) or []
+    rows = []
+    for rank, a in enumerate(articles, start=1):
+        rows.append(
+            {
+                "rank": rank,
+                "title": a.get("title"),
+                "description": a.get("description"),
+                "url": a.get("url"),
+                "source": (a.get("source") or {}).get("name"),
+                "published_at": a.get("publishedAt"),
+                "image_url": a.get("urlToImage"),
+            }
+        )
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["published_at"] = pd.to_datetime(df["published_at"], utc=True, errors="coerce")
     return df
 
 
@@ -155,36 +210,3 @@ def load_recent_selected_matches(snapshot_count: int = 3) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=600)
-def load_news() -> pd.DataFrame:
-    query = f"""
-        WITH latest AS (
-            SELECT *
-            FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME_HEADLINES}`
-            WHERE snapshot_date = (
-                SELECT MAX(snapshot_date)
-                FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME_HEADLINES}`
-            )
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY snapshot_date, snapshot_story_id
-                ORDER BY loaded_at DESC
-            ) = 1
-        )
-        SELECT *
-        FROM latest
-        ORDER BY headline_rank
-    """
-    df = _safe_query_bq(query)
-    if not df.empty:
-        df["published_at"] = pd.to_datetime(df["published_at"], utc=True, errors="coerce")
-    return df
-
-
-@st.cache_data(ttl=600)
-def load_polymarket() -> pd.DataFrame:
-    return load_selected_matches("polymarket")
-
-
-@st.cache_data(ttl=600)
-def load_kalshi() -> pd.DataFrame:
-    return load_selected_matches("kalshi")

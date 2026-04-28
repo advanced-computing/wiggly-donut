@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,7 +12,6 @@ import requests
 import toml
 from google import genai
 from google.oauth2.service_account import Credentials
-from typing import Optional, Union
 
 PROJECT_ID = "sipa-adv-c-wiggly-donut"
 DATASET_ID = "2444_n"
@@ -19,91 +19,101 @@ TABLE_NAME_HEADLINES = "daily_headlines"
 TABLE_NAME_MATCHES = "daily_market_matches"
 TABLE_NAME_BASKETS = "daily_story_baskets"
 
-NEWS_API_BASE = "https://newsapi.org/v2/top-headlines"
-ATTENA_SEARCH_BASE = "https://attena-api.fly.dev/api/search/"
-DEFAULT_HEADLINE_LIMIT = 70
-DEFAULT_MATCH_LIMIT = 5
-NEWSAPI_TOPUP_CATEGORIES = ["business", "technology", "science", "sports", "health"]
+POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com/markets"
+KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
-GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+GEMINI_MODEL = "gemini-3-flash-preview"  # supports Google Search grounding
 GEMINI_LOCATION = "global"
 
-SEARCH_QUERY_PROMPT = """\
-You are helping match news headlines to prediction market contracts on Polymarket and Kalshi.
+# Politics / geopolitics filtering — pragmatic asymmetric design:
+#   - Kalshi has a clean canonical event-level `category` field, so we use it.
+#   - Polymarket has no comparable taxonomy (tags[] is empty across the universe),
+#     so we delegate the editorial choice to Gemini's classifier.
+KALSHI_POLITICS_CATEGORIES = {"politics", "world", "elections", "geopolitics"}
+CLASSIFICATION_OVERSAMPLE = 100  # how many top movers to send to Gemini (Polymarket only)
 
-For each headline below, generate a SHORT search query (2-6 words) that would find
-directly related prediction market contracts. Focus on:
-- The core event, person, or entity (NOT the news outlet name)
-- Named people, companies, countries, or specific events
-- Terms a prediction market would use (elections, prices, outcomes)
+DEFAULT_TOP_MOVERS = 50
+DEFAULT_MAX_STORIES = 15
+MIN_VOLUME_24H = 1000.0  # USD
 
-If a headline is about something that would NEVER have a prediction market
-(e.g. recipes, lifestyle tips, obituaries, human interest stories, movie reviews,
-sports game recaps), return null for that entry.
+PAIRING_PROMPT = """\
+You are pairing prediction market contracts ACROSS Polymarket and Kalshi
+that are about the SAME underlying event/person/outcome.
 
-Return a JSON array with one entry per headline, in the same order.
-Each entry is either a search query string or null.
+Two markets are a VALID pair if ALL of these are true:
+1. Same specific event, person, or outcome being asked about.
+2. Same direction. "X wins" and "X loses" are inverses, NOT a pair.
+3. Same scope. "Next president" and "GOP nominee" are NOT a pair.
 
-Headlines:
-{headlines_json}
+Resolution timeframes and exact thresholds may differ between the two
+platforms (e.g. one closes in June, the other in December; one asks
+"S&P > 6000" and the other "S&P > 6500"). That is OK — pair them anyway
+if they are clearly tracking the same underlying outcome.
 
-Respond ONLY with the JSON array, no markdown fences.
-"""
+Polymarket markets:
+{poly_json}
 
-MATCH_VALIDATION_PROMPT = """\
-You are evaluating whether prediction market contracts are DIRECTLY related to a news headline.
+Kalshi markets:
+{kalshi_json}
 
-A match is DIRECT only if:
-- The market is about the SAME specific event, person, or outcome in the headline
-- The headline's news would materially affect the market's probability
-- A reasonable person would say "this market is about this story"
-
-A match is NOT direct if:
-- The market is only tangentially related (same broad topic but different specific event)
-- The connection requires multiple logical leaps
-- They merely share a keyword (e.g. headline about NBA playoffs -> market about NBA MVP)
-- The market is about a completely different timeframe or context
-
-Headline: {headline_title}
-Description: {headline_description}
-
-Candidate markets:
-{candidates_json}
-
-For each candidate, respond with a JSON array of objects:
-[{{"index": 0, "is_direct_match": true, "reason": "one sentence"}}, ...]
+Return a JSON array of pairs. Each entry uses the integer index from each list:
+[
+  {{"poly_index": 0, "kalshi_index": 3, "reason": "both about X winning Y"}}
+]
 
 Respond ONLY with the JSON array, no markdown fences.
 """
 
-COHERENCE_CHECK_PROMPT = """\
-You are checking whether two prediction market contracts from different platforms
-measure the SAME specific outcome for a news headline.
+POLITICS_CLASSIFICATION_PROMPT = """\
+For each market title below, classify whether it concerns POLITICS or GEOPOLITICS.
 
-They are coherent if:
-- Both markets bet on the same person, entity, or specific outcome
-- Averaging their yes-prices would be a meaningful comparison
-- Example: "Will Biden win 2024?" on Polymarket and "Biden 2024 presidency" on Kalshi = coherent
+POLITICS includes: US/foreign elections, primaries, candidates, party endorsements,
+legislative votes, presidential or executive decisions, supreme-court / judicial outcomes,
+political appointments and confirmations, political scandals.
 
-They are NOT coherent if:
-- They are about the same broader event but different specific outcomes
-- Example: "Tom Steyer wins CA governor" vs "Eric Swalwell wins CA governor" = NOT coherent
-- Example: "S&P 500 above 6000" vs "Nasdaq above 20000" = NOT coherent
+GEOPOLITICS includes: international relations, wars, sanctions, ceasefires, diplomatic
+meetings, foreign policy, regime change, military action between nations, treaties,
+alliances, terrorism affecting state policy.
 
-Headline: {headline_title}
+NOT politics/geopolitics: sports, esports, crypto / token prices, commodity prices,
+weather, AI products, entertainment, science, medical, daily-life trivia, business
+deals not driven by policy.
 
-Polymarket match:
-  Title: {poly_title}
-  Outcome: {poly_outcome}
-  Ticker: {poly_ticker}
+Return a JSON array of booleans, one per market in the same order:
+true  = the market is about politics or geopolitics
+false = anything else (including economics-without-policy, sports, crypto, etc.)
 
-Kalshi match:
-  Title: {kalshi_title}
-  Outcome: {kalshi_outcome}
-  Ticker: {kalshi_ticker}
+The array length MUST equal the number of markets below.
 
-Respond with a JSON object:
-{{"coherent": true/false, "reason": "one sentence", "refined_query": "a better 2-6 word search query to find a matching market on the weaker platform, or null if coherent"}}
+Markets:
+{markets_json}
+
+Respond ONLY with the JSON array, no markdown fences.
+"""
+
+STORY_PROMPT = """\
+A prediction market just moved. Find the most relevant recent news story
+that explains the move and write a headline plus a substantive summary.
+
+Market: {market_title}
+Platform: {source}
+Yes price: {yes_price}%
+24h change: {change_1d:+.2f} percentage points
+
+Use Google Search to find a published news article from the last 7 days
+that directly relates to this market's outcome.
+
+Respond as a JSON object:
+{{"title": "<short factual headline, under 100 chars>",
+  "description": "<a 200-250 word summary covering: (1) what specifically happened, (2) the key
+people, organizations, or events involved, (3) why this matters for the market's specific
+outcome, and (4) what concrete development or signal to watch for next. Be factual and grounded
+in the article — do not speculate beyond what is reported.>",
+  "url": "<full URL to the news article>",
+  "source": "<publisher name, e.g. Reuters, NYT>"}}
+
+If no clearly relevant news is found, respond with:
+{{"title": null, "description": null, "url": null, "source": null}}
 
 Respond ONLY with the JSON object, no markdown fences.
 """
@@ -117,23 +127,7 @@ def _load_local_secrets() -> dict:
         return toml.load(handle)
 
 
-def _get_news_api_key() -> str:
-    if os.getenv("NEWSAPI_API_KEY"):
-        return os.environ["NEWSAPI_API_KEY"]
-
-    secrets = _load_local_secrets()
-    news_section = secrets.get("newsapi", {})
-    key = news_section.get("api_key") or news_section.get("api_token")
-    if key:
-        return key
-
-    raise RuntimeError(
-        "Missing NewsAPI key. Set NEWSAPI_API_KEY or add [newsapi].api_key "
-        "to .streamlit/secrets.toml."
-    )
-
-
-def _get_credentials() -> Optional[Credentials]:
+def _get_credentials() -> Credentials | None:
     if os.getenv("GCP_SERVICE_ACCOUNT_JSON"):
         info = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
         return Credentials.from_service_account_info(info)
@@ -147,7 +141,6 @@ def _get_credentials() -> Optional[Credentials]:
 
 
 def _get_gemini_client() -> genai.Client:
-    """Return a Vertex AI Gemini client using the project service account."""
     creds = _get_credentials()
     if creds is not None:
         creds = creds.with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
@@ -182,463 +175,635 @@ def _write_to_bq(df: pd.DataFrame, table_name: str) -> None:
         kwargs["credentials"] = credentials
 
     print(f"Uploading {len(df)} rows to {DATASET_ID}.{table_name}...")
-    try:
-        pandas_gbq.to_gbq(df, **kwargs)
-    except Exception as exc:
-        error_text = str(exc)
-        if "bigquery.tables.create denied" in error_text or "Permission bigquery.tables.create denied" in error_text:
-            raise RuntimeError(
-                f"BigQuery can read dataset {DATASET_ID}, but it cannot create table {table_name}. "
-                "Create the table first or grant the service account permission to create tables."
-            ) from exc
-        raise
+    pandas_gbq.to_gbq(df, **kwargs)
     print("Upload complete.")
 
 
-def _story_id(url: Optional[str], title: Optional[str]) -> str:
-    base = (url or title or "").strip().lower()
+def _story_id(*parts: str | None) -> str:
+    base = "|".join((p or "").strip().lower() for p in parts)
     return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
 
 
-def _clamp_percent(value: Optional[float]) -> Optional[float]:
-    if value is None:
-        return None
-    return round(max(1.0, min(99.0, value)), 2)
-
-
-def _simulation_step(story_id: str, source: str) -> float:
-    digest = hashlib.sha1(f"{story_id}:{source}".encode()).hexdigest()
-    seed = int(digest[:8], 16)
-    direction = 1 if seed % 2 == 0 else -1
-    magnitude = 1.25 + ((seed // 7) % 350) / 100
-    return round(direction * magnitude, 2)
-
-
-def build_search_query(title: Optional[str], description: Optional[str] = None) -> str:
-    """Fallback search query builder (used when Gemini is unavailable)."""
-    return (title or description or "").strip()
-
-
-def generate_search_queries(headlines: list) -> list:
-    """Use Gemini to generate clean prediction-market search queries for each headline.
-
-    Returns a list the same length as *headlines* where each element is either
-    a short query string or None (meaning no market is expected).
-    """
-    titled = [
-        {"rank": h["headline_rank"], "title": h["title"]}
-        for h in headlines
-    ]
-    client = _get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=SEARCH_QUERY_PROMPT.format(
-            headlines_json=json.dumps(titled, indent=2)
-        ),
-    )
-    raw = response.text.strip()
-    # Strip markdown fences if the model added them
+def _strip_json_fences(raw: str) -> str:
+    raw = raw.strip()
     if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
         if raw.endswith("```"):
-            raw = raw[:raw.rfind("```")]
+            raw = raw[: raw.rfind("```")]
+    return raw.strip()
+
+
+def _safe_float(value, default: float = 0.0) -> float:
     try:
-        queries = json.loads(raw)
-    except json.JSONDecodeError:
-        print("  WARNING: Gemini returned unparseable JSON for search queries, falling back")
-        queries = [build_search_query(h["title"]) for h in headlines]
-    # Ensure length matches
-    if len(queries) != len(headlines):
-        print(f"  WARNING: Gemini returned {len(queries)} queries for {len(headlines)} headlines, padding")
-        queries.extend([None] * (len(headlines) - len(queries)))
-    return queries[:len(headlines)]
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def validate_matches(headline: dict, candidates: list) -> list:
-    """Use Gemini to decide which candidate markets are DIRECT matches for a headline.
-
-    Returns a list of dicts with keys: index, is_direct_match, reason.
-    """
-    candidates_for_prompt = [
-        {
-            "index": i,
-            "market_title": c.get("title", ""),
-            "category": c.get("category", ""),
-        }
-        for i, c in enumerate(candidates)
-    ]
-    client = _get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=MATCH_VALIDATION_PROMPT.format(
-            headline_title=headline.get("title", ""),
-            headline_description=headline.get("description", ""),
-            candidates_json=json.dumps(candidates_for_prompt, indent=2),
-        ),
-    )
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw[:raw.rfind("```")]
-    try:
-        verdicts = json.loads(raw)
-    except json.JSONDecodeError:
-        print("  WARNING: Gemini returned unparseable validation JSON, rejecting all")
-        verdicts = [{"index": i, "is_direct_match": False, "reason": "parse error"} for i in range(len(candidates))]
-    return verdicts
-
-
-def check_coherence(headline: dict, poly_record: dict, kalshi_record: dict) -> dict:
-    """Ask Gemini whether the Polymarket and Kalshi matches measure the same outcome.
-
-    Returns a dict with keys: coherent, reason, refined_query.
-    """
-    client = _get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=COHERENCE_CHECK_PROMPT.format(
-            headline_title=headline.get("title", ""),
-            poly_title=poly_record.get("market_title", ""),
-            poly_outcome=poly_record.get("outcome_label", ""),
-            poly_ticker=poly_record.get("ticker", ""),
-            kalshi_title=kalshi_record.get("market_title", ""),
-            kalshi_outcome=kalshi_record.get("outcome_label", ""),
-            kalshi_ticker=kalshi_record.get("ticker", ""),
-        ),
-    )
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw[:raw.rfind("```")]
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        print("  WARNING: Gemini returned unparseable coherence JSON, assuming incoherent")
-        return {"coherent": False, "reason": "parse error", "refined_query": None}
-
-
-def _to_percent(value: Union[float, int, None]) -> Optional[float]:
+def _to_percent(value: float | int | None) -> float | None:
     if value is None:
         return None
     value = float(value)
-    return round(value * 100, 2) if value <= 1 else round(value, 2)
+    return round(value * 100, 2) if abs(value) <= 1 else round(value, 2)
 
 
-def _fetch_newsapi_articles(
-    country: str,
-    limit: int,
-    category: Optional[str] = None,
+def classify_politics_markets(movers: list[dict]) -> list[bool]:
+    """Use Gemini to classify a list of markets as politics/geopolitics or not.
+
+    Returns a list of booleans the same length as `movers`. On any failure
+    (parse error, network error, length mismatch) we conservatively keep
+    everything (return all True) so the daily run still produces output;
+    a warning is logged so it surfaces in the ETL log.
+    """
+    if not movers:
+        return []
+
+    items = [{"index": i, "title": m["title"]} for i, m in enumerate(movers)]
+    from google.genai import types as genai_types
+
+    client = _get_gemini_client()
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=POLITICS_CLASSIFICATION_PROMPT.format(
+                markets_json=json.dumps(items, indent=2),
+            ),
+            config=genai_types.GenerateContentConfig(
+                thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
+            ),
+        )
+    except Exception as exc:
+        print(f"  WARNING: politics classification call failed ({exc}); keeping all")
+        return [True] * len(movers)
+
+    raw = _strip_json_fences(response.text or "")
+    try:
+        verdicts = json.loads(raw)
+    except json.JSONDecodeError:
+        print("  WARNING: politics classification JSON unparseable; keeping all")
+        return [True] * len(movers)
+
+    if len(verdicts) != len(movers):
+        print(
+            f"  WARNING: classifier returned {len(verdicts)} verdicts for "
+            f"{len(movers)} markets; padding with False"
+        )
+        verdicts = (list(verdicts) + [False] * len(movers))[: len(movers)]
+    return [bool(v) for v in verdicts]
+
+
+def _movement_score(change_1d_pp: float, volume_24h: float) -> float:
+    """Volume-weighted movement score. abs(change_pp) * log(1 + volume).
+
+    Penalizes thin markets that wave wildly without conviction. Bigger volume
+    means more dispersed information backing the price, so a 5pp move on $5M
+    deserves to outrank a 30pp move on $1k.
+    """
+    import math
+    return abs(change_1d_pp) * math.log1p(max(volume_24h, 0.0))
+
+
+def _dedupe_movers_by_event(movers: list[dict], event_key: str) -> list[dict]:
+    """Keep only the top-scoring market per event (by volume-weighted score).
+
+    Markets without a usable event key are kept as-is (each treated as its own event).
+    """
+    by_event: dict[str, dict] = {}
+    untagged: list[dict] = []
+    for m in movers:
+        key = (m.get(event_key) or "").strip()
+        if not key:
+            untagged.append(m)
+            continue
+        score = _movement_score(m["change_1d"], m["volume_24h"])
+        existing = by_event.get(key)
+        existing_score = (
+            _movement_score(existing["change_1d"], existing["volume_24h"])
+            if existing
+            else float("-inf")
+        )
+        if score > existing_score:
+            by_event[key] = m
+    return list(by_event.values()) + untagged
+
+
+def _fetch_polymarket_pages(max_pages: int = 8, page_size: int = 100) -> list[dict]:
+    markets: list[dict] = []
+    for page in range(max_pages):
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": page_size,
+            "offset": page * page_size,
+            "order": "volume24hr",
+            "ascending": "false",
+        }
+        resp = requests.get(POLYMARKET_GAMMA_BASE, params=params, timeout=30)
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:
+            break
+        markets.extend(batch)
+        if len(batch) < page_size:
+            break
+    return markets
+
+
+def fetch_polymarket_movers(
+    limit: int = DEFAULT_TOP_MOVERS,
+    min_volume_24h: float = MIN_VOLUME_24H,
 ) -> list[dict]:
-    params = {"country": country, "pageSize": limit}
-    if category:
-        params["category"] = category
+    """Pull all-active Polymarket movers, then Gemini-classify the top movers
+    by volume-weighted score and keep only politics/geopolitics."""
+    print("Fetching Polymarket markets (no pre-filter)...")
+    markets = _fetch_polymarket_pages()
 
-    response = requests.get(
-        NEWS_API_BASE,
-        params=params,
-        headers={"X-Api-Key": _get_news_api_key()},
-        timeout=20,
+    movers: list[dict] = []
+    for m in markets:
+        volume_24h = _safe_float(m.get("volume24hr"))
+        if volume_24h < min_volume_24h:
+            continue
+
+        last_trade = _safe_float(m.get("lastTradePrice"))
+        change_1d = _safe_float(m.get("oneDayPriceChange"))
+        if last_trade <= 0:
+            continue
+
+        events = m.get("events") or []
+        primary_event = events[0] if events else {}
+        # Parse the YES outcome's CLOB token id (first of two: YES, NO).
+        clob_token_ids: list[str] = []
+        raw_clob = m.get("clobTokenIds")
+        if isinstance(raw_clob, str):
+            try:
+                clob_token_ids = json.loads(raw_clob)
+            except json.JSONDecodeError:
+                clob_token_ids = []
+        elif isinstance(raw_clob, list):
+            clob_token_ids = raw_clob
+        yes_token_id = clob_token_ids[0] if clob_token_ids else None
+
+        movers.append(
+            {
+                "source": "polymarket",
+                "market_id": m.get("conditionId") or str(m.get("id") or ""),
+                "title": m.get("question") or "",
+                "yes_price": round(last_trade * 100, 2),
+                "no_price": round((1 - last_trade) * 100, 2),
+                "change_1d": round(change_1d * 100, 2),
+                "volume_24h": round(volume_24h, 2),
+                "category": primary_event.get("seriesSlug"),
+                "event_ticker": primary_event.get("ticker"),
+                "close_time": m.get("endDate") or primary_event.get("endDate"),
+                "source_url": f"https://polymarket.com/market/{m.get('slug', '')}",
+                "outcome_label": "YES",
+                "ticker": m.get("conditionId"),
+                "yes_token_id": yes_token_id,
+            }
+        )
+
+    # Dedup by event so each event takes only one classification slot.
+    deduped = _dedupe_movers_by_event(movers, event_key="event_ticker")
+    deduped.sort(
+        key=lambda r: _movement_score(r["change_1d"], r["volume_24h"]), reverse=True,
     )
-    response.raise_for_status()
-    return response.json().get("articles", [])
+    print(f"  {len(movers)} markets above volume floor; {len(deduped)} after event dedup")
+
+    # Take top-N candidates and let Gemini classify which are politics.
+    candidates = deduped[:CLASSIFICATION_OVERSAMPLE]
+    print(f"  Classifying top {len(candidates)} Polymarket movers as politics/geopolitics...")
+    keep = classify_politics_markets(candidates)
+    politics = [m for m, ok in zip(candidates, keep, strict=False) if ok]
+    print(f"  {len(politics)} of {len(candidates)} classified as politics/geopolitics")
+
+    politics.sort(
+        key=lambda r: _movement_score(r["change_1d"], r["volume_24h"]), reverse=True,
+    )
+    return politics[:limit]
 
 
-def get_top_headlines(
+def _kalshi_paginate(path: str, params: dict, max_pages: int = 15) -> list[dict]:
+    """Cursor-paginate a Kalshi list endpoint with backoff on 429s."""
+    import time as _time
+
+    rows: list[dict] = []
+    cursor = ""
+    base_params = dict(params)
+    url = f"{KALSHI_BASE}/{path}"
+    for _ in range(max_pages):
+        page_params = dict(base_params)
+        if cursor:
+            page_params["cursor"] = cursor
+
+        backoff = 1.0
+        for attempt in range(6):
+            resp = requests.get(url, params=page_params, timeout=30)
+            if resp.status_code == 429:
+                retry_after = float(resp.headers.get("Retry-After", backoff))
+                print(f"  Kalshi 429; sleeping {retry_after:.1f}s (attempt {attempt + 1})")
+                _time.sleep(retry_after)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            raise RuntimeError(f"Kalshi rate-limit retry exhausted on {path}")
+
+        # Pace requests slightly to stay under the rate limit.
+        _time.sleep(0.25)
+
+        data = resp.json()
+        for key in ("events", "markets", "data"):
+            if key in data and isinstance(data[key], list):
+                rows.extend(data[key])
+                break
+        cursor = data.get("cursor") or ""
+        if not cursor:
+            break
+    return rows
+
+
+def fetch_kalshi_movers(
+    limit: int = DEFAULT_TOP_MOVERS,
+    min_volume_24h: float = MIN_VOLUME_24H,
+) -> list[dict]:
+    """Pull Kalshi markets pre-filtered by Kalshi's own canonical event category
+    (Politics / Elections / World / Geopolitics). Kalshi's taxonomy is clean
+    and consistently populated, so no Gemini classifier is needed here."""
+    print("Fetching Kalshi events with nested markets...")
+    events = _kalshi_paginate(
+        "events",
+        {"status": "open", "limit": 200, "with_nested_markets": "true"},
+        max_pages=25,
+    )
+    politics_events = [
+        e for e in events
+        if (e.get("category") or "").lower() in KALSHI_POLITICS_CATEGORIES
+    ]
+    print(
+        f"  {len(politics_events)} politics events out of {len(events)} open "
+        "(category in {Politics, Elections, World, Geopolitics})"
+    )
+
+    movers: list[dict] = []
+    for event in politics_events:
+        for m in event.get("markets") or []:
+            last = _safe_float(m.get("last_price_dollars"))
+            prev = _safe_float(m.get("previous_price_dollars"))
+            volume_24h = _safe_float(m.get("volume_24h_fp"))
+            if volume_24h < min_volume_24h:
+                continue
+            if last <= 0 and prev <= 0:
+                continue
+
+            change_1d = (last - prev) * 100  # dollars (0-1) -> percentage points
+            ticker = m.get("ticker") or ""
+            event_ticker = event.get("event_ticker")
+            movers.append(
+                {
+                    "source": "kalshi",
+                    "market_id": ticker,
+                    "title": m.get("title") or event.get("title"),
+                    "yes_price": round(last * 100, 2),
+                    "no_price": round((1 - last) * 100, 2) if last else None,
+                    "change_1d": round(change_1d, 2),
+                    "volume_24h": round(volume_24h, 2),
+                    "category": event.get("category"),
+                    "event_ticker": event_ticker,
+                    "series_ticker": event.get("series_ticker"),
+                    "close_time": m.get("close_time"),
+                    "source_url": f"https://kalshi.com/markets/{(event_ticker or '').lower()}",
+                    "outcome_label": m.get("yes_sub_title") or "YES",
+                    "ticker": ticker,
+                }
+            )
+
+    # Pre-filtered by event category, so no Gemini classifier needed here.
+    deduped = _dedupe_movers_by_event(movers, event_key="event_ticker")
+    deduped.sort(
+        key=lambda r: _movement_score(r["change_1d"], r["volume_24h"]), reverse=True,
+    )
+    print(f"  {len(movers)} markets above volume floor; {len(deduped)} after event dedup")
+    return deduped[:limit]
+
+
+def pair_markets_across_platforms(
+    poly_movers: list[dict],
+    kalshi_movers: list[dict],
+) -> list[dict]:
+    """Use Gemini to find pairs of markets across platforms that measure the same outcome."""
+    if not poly_movers or not kalshi_movers:
+        return []
+
+    poly_for_prompt = [
+        {
+            "index": i,
+            "title": m["title"],
+            "yes_price": m["yes_price"],
+            "close_time": m["close_time"],
+        }
+        for i, m in enumerate(poly_movers)
+    ]
+    kalshi_for_prompt = [
+        {
+            "index": i,
+            "title": m["title"],
+            "yes_price": m["yes_price"],
+            "close_time": m["close_time"],
+        }
+        for i, m in enumerate(kalshi_movers)
+    ]
+
+    from google.genai import types as genai_types
+
+    client = _get_gemini_client()
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=PAIRING_PROMPT.format(
+            poly_json=json.dumps(poly_for_prompt, indent=2, default=str),
+            kalshi_json=json.dumps(kalshi_for_prompt, indent=2, default=str),
+        ),
+        config=genai_types.GenerateContentConfig(
+            thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
+        ),
+    )
+    raw = _strip_json_fences(response.text)
+    try:
+        pairs = json.loads(raw)
+    except json.JSONDecodeError:
+        print("  WARNING: Gemini returned unparseable pairing JSON; no pairs")
+        return []
+
+    valid: list[dict] = []
+    for p in pairs:
+        try:
+            poly_idx = int(p["poly_index"])
+            kalshi_idx = int(p["kalshi_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 <= poly_idx < len(poly_movers) and 0 <= kalshi_idx < len(kalshi_movers):
+            valid.append(
+                {
+                    "poly_index": poly_idx,
+                    "kalshi_index": kalshi_idx,
+                    "reason": p.get("reason", ""),
+                }
+            )
+    return valid
+
+
+def generate_story_for_pair(
+    market_title: str,
+    source: str,
+    yes_price: float,
+    change_1d: float,
+) -> dict:
+    """Use Gemini with Google Search grounding to find a relevant news story.
+
+    Returns a dict with keys: title, description, url, source. The url and source
+    are taken from grounding_metadata when available (verified search result),
+    falling back to whatever Gemini wrote in JSON otherwise.
+    """
+    from google.genai import types as genai_types
+
+    client = _get_gemini_client()
+    prompt = STORY_PROMPT.format(
+        market_title=market_title,
+        source=source,
+        yes_price=yes_price,
+        change_1d=change_1d,
+    )
+
+    config = genai_types.GenerateContentConfig(
+        tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+        thinking_config=genai_types.ThinkingConfig(thinking_level="low"),
+        temperature=0.2,
+    )
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=config,
+        )
+    except Exception as exc:
+        print(f"  Grounded story call failed ({exc})")
+        return {"title": None, "description": None, "url": None, "source": None}
+
+    raw = _strip_json_fences(response.text or "")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = {"title": None, "description": None, "url": None, "source": None}
+
+    # Prefer grounding_metadata for url/source — those are real search results.
+    # Only fall back to Gemini's JSON-claimed url if grounding returned nothing.
+    candidates = response.candidates or []
+    gm = candidates[0].grounding_metadata if candidates else None
+    chunks = (gm.grounding_chunks if gm else None) or []
+    if chunks:
+        first = chunks[0].web
+        if first and first.uri:
+            parsed["url"] = first.uri
+            parsed["source"] = first.title or parsed.get("source")
+    return parsed
+
+
+def _generate_headlines_parallel(stories: list[dict], max_workers: int = 5) -> None:
+    """Populate s['headline'] for each story by calling Gemini in parallel.
+
+    Streams a one-line progress event per call so you can see grounding land
+    in real time (and verify it's actually returning real news, not nulls).
+    """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _one(idx: int, s: dict) -> tuple[int, dict, float]:
+        t0 = _time.time()
+        primary = s["poly"] or s["kalshi"]
+        changes = [mv["change_1d"] for mv in (s["poly"], s["kalshi"]) if mv is not None]
+        avg_change = sum(changes) / len(changes) if changes else 0.0
+        headline = generate_story_for_pair(
+            market_title=primary["title"],
+            source="both" if (s["poly"] and s["kalshi"]) else primary["source"],
+            yes_price=primary["yes_price"],
+            change_1d=avg_change,
+        )
+        return idx, headline, _time.time() - t0
+
+    print(
+        f"Generating {len(stories)} headlines via Gemini grounded search "
+        f"({max_workers}-way parallel)...",
+        flush=True,
+    )
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_one, i, s): (i, s) for i, s in enumerate(stories)}
+        for fut in as_completed(futures):
+            idx, headline, dt = fut.result()
+            stories[idx]["headline"] = headline
+            completed += 1
+            title = (headline.get("title") or "")[:55]
+            src = headline.get("source") or "no-source"
+            url = (headline.get("url") or "")[:50]
+            status = f"-> {title!r} [{src}]" if title else "-> (no story found)"
+            print(
+                f"  [{completed:>2}/{len(stories)}] {dt:5.1f}s  {status}  {url}",
+                flush=True,
+            )
+
+
+def _build_stories(
+    pairs: list[dict],
+    poly_movers: list[dict],
+    kalshi_movers: list[dict],
+    max_stories: int,
+) -> list[dict]:
+    """Combine paired and unpaired movers into a ranked story list.
+
+    Cross-platform pairs are ALWAYS included (they are our strongest signal that
+    something real moved — two independent venues agreed). Remaining slots are
+    filled with the highest volume-weighted movers from either platform.
+    """
+    paired_poly = {p["poly_index"] for p in pairs}
+    paired_kalshi = {p["kalshi_index"] for p in pairs}
+
+    paired_stories: list[dict] = [
+        {
+            "poly": poly_movers[p["poly_index"]],
+            "kalshi": kalshi_movers[p["kalshi_index"]],
+            "pair_reason": p.get("reason", ""),
+        }
+        for p in pairs
+    ]
+
+    unpaired_stories: list[dict] = []
+    for i, m in enumerate(poly_movers):
+        if i not in paired_poly:
+            unpaired_stories.append({"poly": m, "kalshi": None, "pair_reason": ""})
+    for i, m in enumerate(kalshi_movers):
+        if i not in paired_kalshi:
+            unpaired_stories.append({"poly": None, "kalshi": m, "pair_reason": ""})
+
+    def avg_score(s: dict) -> float:
+        scores = [
+            _movement_score(m["change_1d"], m["volume_24h"])
+            for m in (s["poly"], s["kalshi"])
+            if m is not None
+        ]
+        return sum(scores) / len(scores) if scores else 0.0
+
+    paired_stories.sort(key=avg_score, reverse=True)
+    unpaired_stories.sort(key=avg_score, reverse=True)
+
+    if len(paired_stories) >= max_stories:
+        return paired_stories[:max_stories]
+    needed = max_stories - len(paired_stories)
+    return paired_stories + unpaired_stories[:needed]
+
+
+def _stories_to_headlines(
+    stories: list[dict],
     snapshot_date: date,
     loaded_at: datetime,
-    country: str = "us",
-    limit: int = DEFAULT_HEADLINE_LIMIT,
 ) -> pd.DataFrame:
-    print("Fetching top headlines from NewsAPI...")
-    articles = _fetch_newsapi_articles(country=country, limit=limit)
-    seen_ids: set[str] = set()
-    ordered_articles: list[dict] = []
+    rows = []
+    for rank, s in enumerate(stories, start=1):
+        primary = s["poly"] or s["kalshi"]
+        headline = s.get("headline") or {}
+        title = headline.get("title") or primary["title"]
+        description = headline.get("description")
+        url = headline.get("url") or primary["source_url"]
+        news_source = headline.get("source")
+        published_at = pd.to_datetime(loaded_at, utc=True, errors="coerce")
 
-    for article in articles:
-        story_id = _story_id(article.get("url"), article.get("title"))
-        if story_id in seen_ids:
-            continue
-        seen_ids.add(story_id)
-        ordered_articles.append(article)
+        story_id = _story_id(
+            s["poly"]["market_id"] if s["poly"] else None,
+            s["kalshi"]["market_id"] if s["kalshi"] else None,
+            primary["title"],
+        )
+        # Content-derived snapshot id so reruns with different stories don't
+        # collide with prior runs at the same rank position.
+        snapshot_story_id = f"{snapshot_date.isoformat()}-{story_id[:10]}"
+        s["story_id"] = story_id
+        s["snapshot_story_id"] = snapshot_story_id
+        s["headline_rank"] = rank
+        s["resolved_title"] = title
+        s["resolved_url"] = url
+        s["resolved_source"] = news_source
 
-    if len(ordered_articles) < limit:
-        for category in NEWSAPI_TOPUP_CATEGORIES:
-            if len(ordered_articles) >= limit:
-                break
-            top_up_articles = _fetch_newsapi_articles(country=country, limit=limit, category=category)
-            for article in top_up_articles:
-                story_id = _story_id(article.get("url"), article.get("title"))
-                if story_id in seen_ids:
-                    continue
-                seen_ids.add(story_id)
-                ordered_articles.append(article)
-                if len(ordered_articles) >= limit:
-                    break
-
-    records = []
-    for rank, article in enumerate(ordered_articles[:limit], start=1):
-        title = article.get("title")
-        description = article.get("description")
-        story_id = _story_id(article.get("url"), title)
-        records.append(
+        rows.append(
             {
                 "snapshot_date": snapshot_date,
                 "loaded_at": loaded_at,
-                "snapshot_story_id": f"{snapshot_date.isoformat()}-{rank:02d}",
+                "snapshot_story_id": snapshot_story_id,
                 "story_id": story_id,
                 "headline_rank": rank,
                 "title": title,
                 "description": description,
-                "content": article.get("content"),
-                "news_source": article.get("source", {}).get("name"),
-                "published_at": pd.to_datetime(article.get("publishedAt"), utc=True, errors="coerce"),
-                "url": article.get("url"),
-                "image_url": article.get("urlToImage"),
-                "search_query": build_search_query(title, description),
+                "content": None,
+                "news_source": news_source,
+                "published_at": published_at,
+                "url": url,
+                "image_url": None,
+                "search_query": s.get("pair_reason") or "trending:politics",
             }
         )
-
-    return pd.DataFrame(records)
-
-
-def search_attena(query: str, source: str, limit: int = DEFAULT_MATCH_LIMIT) -> list[dict]:
-    if not query:
-        return []
-
-    response = requests.get(
-        ATTENA_SEARCH_BASE,
-        params={"q": query, "source": source, "limit": limit},
-        timeout=20,
-    )
-    response.raise_for_status()
-    return response.json().get("results", [])
+    return pd.DataFrame(rows)
 
 
-def _score_candidate(candidate: dict, candidate_rank: int) -> tuple:
-    """Score a candidate by Attena rank and trading volume."""
-    volume_24h = float(candidate.get("volume_24h") or 0)
-    rank_bonus = 1 / max(float(candidate.get("rank") or candidate_rank), 1)
-    volume_bonus = min(volume_24h / 1_000_000, 5) / 10
-    score = rank_bonus + volume_bonus
-    return round(score, 4), 0
-
-
-def build_market_matches(
-    headlines: pd.DataFrame,
+def _stories_to_matches(
+    stories: list[dict],
     snapshot_date: date,
     loaded_at: datetime,
-    limit_per_source: int = DEFAULT_MATCH_LIMIT,
 ) -> pd.DataFrame:
-    headline_list = headlines.to_dict("records")
-    records: list = []
-
-    # --- STEP 1: Batch-generate search queries via Gemini ---
-    print("Generating search queries with Gemini...")
-    search_queries = generate_search_queries(headline_list)
-    for h, q in zip(headline_list, search_queries):
-        label = q if q else "(skipped)"
-        print(f"  #{h['headline_rank']}: {h['title'][:60]}...  ->  {label}")
-
-    for headline, query in zip(headline_list, search_queries):
-        if query is None:
-            print(f"  Skipping headline #{headline['headline_rank']}: no market expected")
-            continue
-
-        # Store the Gemini-generated query
-        headline["search_query"] = query
-
-        # Gather candidates from both platforms
-        all_candidates = []
-        for source in ("polymarket", "kalshi"):
-            print(
-                f"  Searching Attena for #{headline['headline_rank']} on {source}: {query}"
-            )
-            candidates = search_attena(query, source, limit=limit_per_source)
-            for c in candidates:
-                c["_source"] = source
-            all_candidates.extend(candidates)
-
-        if not all_candidates:
-            continue
-
-        # --- STEP 2: Validate candidates with Gemini ---
-        print(f"  Validating {len(all_candidates)} candidates with Gemini...")
-        verdicts = validate_matches(headline, all_candidates)
-        verdict_lookup = {}
-        for v in verdicts:
-            idx = v.get("index")
-            if idx is not None:
-                verdict_lookup[idx] = v
-
-        # Build records for each candidate, per source
-        candidates_by_source = {}
-        for i, candidate in enumerate(all_candidates):
-            source = candidate.pop("_source")
-            is_direct = verdict_lookup.get(i, {}).get("is_direct_match", False)
-            reason = verdict_lookup.get(i, {}).get("reason", "")
-            candidate_rank = (i % limit_per_source) + 1
-            match_score, overlap = _score_candidate(candidate, candidate_rank)
-
-            record = {
-                "snapshot_date": snapshot_date,
-                "loaded_at": loaded_at,
-                "snapshot_story_id": headline["snapshot_story_id"],
-                "story_id": headline["story_id"],
-                "headline_rank": headline["headline_rank"],
-                "headline_title": headline["title"],
-                "search_query": query,
-                "source": source,
-                "candidate_rank": candidate_rank,
-                "attena_rank": float(candidate.get("rank") or candidate_rank),
-                "token_overlap": overlap,
-                "match_score": match_score,
-                "market_id": candidate.get("market_id"),
-                "market_title": candidate.get("title"),
-                "yes_price": _to_percent(candidate.get("yes_price")),
-                "no_price": _to_percent(candidate.get("no_price")),
-                "volume": float(candidate.get("volume") or 0),
-                "volume_24h": float(candidate.get("volume_24h") or 0),
-                "category": candidate.get("category"),
-                "subcategory": candidate.get("subcategory"),
-                "event_date": pd.to_datetime(
-                    candidate.get("event_date"), errors="coerce"
-                ).date()
-                if candidate.get("event_date")
-                else None,
-                "close_time": pd.to_datetime(
-                    candidate.get("close_time"), utc=True, errors="coerce"
-                ),
-                "source_url": candidate.get("source_url"),
-                "ticker": candidate.get("ticker"),
-                "outcome_label": candidate.get("outcome_label"),
-                "bracket_count": int(candidate.get("bracket_count") or 1),
-                "status": candidate.get("status"),
-                "selected": False,
-                "gemini_direct_match": is_direct,
-                "gemini_match_reason": reason,
-            }
-
-            records.append(record)
-            candidates_by_source.setdefault(source, []).append(record)
-
-        # Select the best DIRECT match per source; if none are direct, skip
-        for source, source_records in candidates_by_source.items():
-            direct_records = [r for r in source_records if r["gemini_direct_match"]]
-            if not direct_records:
+    rows: list[dict] = []
+    for s in stories:
+        for source_key, market in (("polymarket", s["poly"]), ("kalshi", s["kalshi"])):
+            if market is None:
                 continue
-            best = max(
-                direct_records,
-                key=lambda r: (r["match_score"], -r["candidate_rank"]),
+            close_time = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+            event_date = (
+                close_time.date()
+                if isinstance(close_time, pd.Timestamp) and not pd.isna(close_time)
+                else None
             )
-            best["selected"] = True
-
-        # --- STEP 3: Cross-platform coherence check ---
-        selected_by_source = {
-            source: next((r for r in recs if r["selected"]), None)
-            for source, recs in candidates_by_source.items()
-        }
-        poly_sel = selected_by_source.get("polymarket")
-        kalshi_sel = selected_by_source.get("kalshi")
-
-        if poly_sel and kalshi_sel:
-            print(f"  Checking coherence: '{poly_sel['market_title']}' vs '{kalshi_sel['market_title']}'")
-            coherence = check_coherence(headline, poly_sel, kalshi_sel)
-
-            if not coherence.get("coherent", True):
-                print(f"  NOT coherent: {coherence.get('reason', '')}")
-                refined_query = coherence.get("refined_query")
-
-                if refined_query:
-                    # Decide which platform to retry: keep the higher-volume match
-                    if poly_sel["volume_24h"] >= kalshi_sel["volume_24h"]:
-                        retry_source = "kalshi"
-                        anchor_title = poly_sel["market_title"]
-                    else:
-                        retry_source = "polymarket"
-                        anchor_title = kalshi_sel["market_title"]
-
-                    print(f"  Retrying {retry_source} with refined query: {refined_query}")
-                    retry_candidates = search_attena(refined_query, retry_source, limit=limit_per_source)
-
-                    if retry_candidates:
-                        for c in retry_candidates:
-                            c["_source"] = retry_source
-                        print(f"  Validating {len(retry_candidates)} retry candidates...")
-                        retry_verdicts = validate_matches(headline, retry_candidates)
-                        retry_verdict_lookup = {}
-                        for v in retry_verdicts:
-                            idx = v.get("index")
-                            if idx is not None:
-                                retry_verdict_lookup[idx] = v
-
-                        # Deselect the old match on the retry platform
-                        old_sel = selected_by_source[retry_source]
-                        old_sel["selected"] = False
-
-                        # Build records and pick the best direct match
-                        best_retry = None
-                        for i, candidate in enumerate(retry_candidates):
-                            source = candidate.pop("_source")
-                            is_direct = retry_verdict_lookup.get(i, {}).get("is_direct_match", False)
-                            reason = retry_verdict_lookup.get(i, {}).get("reason", "")
-                            c_rank = i + 1
-                            m_score, m_overlap = _score_candidate(candidate, c_rank)
-
-                            retry_record = {
-                                "snapshot_date": snapshot_date,
-                                "loaded_at": loaded_at,
-                                "snapshot_story_id": headline["snapshot_story_id"],
-                                "story_id": headline["story_id"],
-                                "headline_rank": headline["headline_rank"],
-                                "headline_title": headline["title"],
-                                "search_query": refined_query,
-                                "source": source,
-                                "candidate_rank": c_rank,
-                                "attena_rank": float(candidate.get("rank") or c_rank),
-                                "token_overlap": m_overlap,
-                                "match_score": m_score,
-                                "market_id": candidate.get("market_id"),
-                                "market_title": candidate.get("title"),
-                                "yes_price": _to_percent(candidate.get("yes_price")),
-                                "no_price": _to_percent(candidate.get("no_price")),
-                                "volume": float(candidate.get("volume") or 0),
-                                "volume_24h": float(candidate.get("volume_24h") or 0),
-                                "category": candidate.get("category"),
-                                "subcategory": candidate.get("subcategory"),
-                                "event_date": pd.to_datetime(
-                                    candidate.get("event_date"), errors="coerce"
-                                ).date()
-                                if candidate.get("event_date")
-                                else None,
-                                "close_time": pd.to_datetime(
-                                    candidate.get("close_time"), utc=True, errors="coerce"
-                                ),
-                                "source_url": candidate.get("source_url"),
-                                "ticker": candidate.get("ticker"),
-                                "outcome_label": candidate.get("outcome_label"),
-                                "bracket_count": int(candidate.get("bracket_count") or 1),
-                                "status": candidate.get("status"),
-                                "selected": False,
-                                "gemini_direct_match": is_direct,
-                                "gemini_match_reason": reason,
-                            }
-                            records.append(retry_record)
-                            if is_direct and (best_retry is None or m_score > best_retry["match_score"]):
-                                best_retry = retry_record
-
-                        if best_retry:
-                            best_retry["selected"] = True
-                            print(f"  Retry selected: {best_retry['market_title']}")
-                        else:
-                            print("  Retry found no direct match, keeping only single-platform match")
-                    else:
-                        print("  Retry returned no candidates")
-            else:
-                print(f"  Coherent: {coherence.get('reason', '')}")
-
-    return pd.DataFrame(records)
+            rows.append(
+                {
+                    "snapshot_date": snapshot_date,
+                    "loaded_at": loaded_at,
+                    "snapshot_story_id": s["snapshot_story_id"],
+                    "story_id": s["story_id"],
+                    "headline_rank": s["headline_rank"],
+                    "headline_title": s["resolved_title"],
+                    "search_query": s.get("pair_reason") or "trending:politics",
+                    "source": source_key,
+                    "candidate_rank": 1,
+                    "attena_rank": None,
+                    "token_overlap": None,
+                    "match_score": abs(market["change_1d"]),
+                    "market_id": market["market_id"],
+                    "market_title": market["title"],
+                    "yes_price": market["yes_price"],
+                    "no_price": market["no_price"],
+                    "volume": None,
+                    "volume_24h": market["volume_24h"],
+                    "category": market.get("category"),
+                    "subcategory": None,
+                    "event_date": event_date,
+                    "close_time": close_time,
+                    "source_url": market["source_url"],
+                    "ticker": market.get("ticker"),
+                    "outcome_label": market.get("outcome_label"),
+                    "bracket_count": 1,
+                    "status": "open",
+                    "selected": True,
+                    "gemini_direct_match": True,
+                    "gemini_match_reason": s.get("pair_reason") or None,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def get_previous_selected_prices(snapshot_date: date) -> pd.DataFrame:
@@ -660,7 +825,6 @@ def get_previous_selected_prices(snapshot_date: date) -> pd.DataFrame:
             ORDER BY snapshot_date DESC
         ) = 1
     """
-
     try:
         return _read_gbq(query)
     except Exception:
@@ -687,9 +851,7 @@ def build_story_baskets(
             if not selected_matches.empty
             else pd.DataFrame()
         )
-        matches_by_source = {
-            row["source"]: row for row in current_matches.to_dict("records")
-        }
+        matches_by_source = {row["source"]: row for row in current_matches.to_dict("records")}
 
         poly = matches_by_source.get("polymarket")
         kalshi = matches_by_source.get("kalshi")
@@ -711,7 +873,9 @@ def build_story_baskets(
             compared_current_prices.append(match["yes_price"])
             previous_platform_prices.append(previous_price)
 
-        basket_yes_price = round(sum(current_prices) / len(current_prices), 2) if current_prices else None
+        basket_yes_price = (
+            round(sum(current_prices) / len(current_prices), 2) if current_prices else None
+        )
         basket_prev_yes_price = (
             round(sum(previous_platform_prices) / len(previous_platform_prices), 2)
             if previous_platform_prices
@@ -766,6 +930,26 @@ def build_story_baskets(
                 "basket_yes_price": basket_yes_price,
                 "basket_prev_yes_price": basket_prev_yes_price,
                 "basket_change_1d": basket_change,
+                "basket_volume_24h": round(
+                    (
+                        sum(float(m.get("volume_24h") or 0) for m in (poly, kalshi) if m)
+                        / max(sum(1 for m in (poly, kalshi) if m), 1)
+                    ),
+                    2,
+                ),
+                "basket_score": round(
+                    _movement_score(
+                        sum(
+                            abs(float(m.get("match_score") or 0))
+                            for m in (poly, kalshi)
+                            if m
+                        )
+                        / max(sum(1 for m in (poly, kalshi) if m), 1),
+                        sum(float(m.get("volume_24h") or 0) for m in (poly, kalshi) if m)
+                        / max(sum(1 for m in (poly, kalshi) if m), 1),
+                    ),
+                    4,
+                ),
             }
         )
 
@@ -773,7 +957,9 @@ def build_story_baskets(
     if baskets.empty:
         return baskets
 
-    sort_key = pd.to_numeric(baskets["basket_change_1d"], errors="coerce").abs().fillna(-1)
+    # Rank by volume-weighted movement score. Tiebreak by complete_basket
+    # (paired stories) then headline_rank (original ordering from upstream).
+    sort_key = pd.to_numeric(baskets["basket_score"], errors="coerce").fillna(-1)
     sorted_story_ids = (
         baskets.assign(_sort_key=sort_key)
         .sort_values(
@@ -787,83 +973,245 @@ def build_story_baskets(
     return baskets
 
 
-def _clone_headlines_for_date(
+def run_daily_snapshot(
+    snapshot_date: date,
+    top_movers: int = DEFAULT_TOP_MOVERS,
+    max_stories: int = DEFAULT_MAX_STORIES,
+) -> None:
+    loaded_at = datetime.now(timezone.utc)
+
+    poly_movers = fetch_polymarket_movers(limit=top_movers)
+    kalshi_movers = fetch_kalshi_movers(limit=top_movers)
+
+    if not poly_movers and not kalshi_movers:
+        raise RuntimeError("No politics movers returned from either platform.")
+
+    print("Pairing markets across platforms with Gemini...")
+    pairs = pair_markets_across_platforms(poly_movers, kalshi_movers)
+    print(f"  {len(pairs)} valid pairs identified")
+
+    stories = _build_stories(pairs, poly_movers, kalshi_movers, max_stories)
+    print(f"Building {len(stories)} stories (paired + unpaired top movers)")
+
+    _generate_headlines_parallel(stories)
+
+    headlines_df = _stories_to_headlines(stories, snapshot_date, loaded_at)
+    matches_df = _stories_to_matches(stories, snapshot_date, loaded_at)
+
+    previous_prices = get_previous_selected_prices(snapshot_date)
+    baskets_df = build_story_baskets(
+        headlines=headlines_df,
+        matches=matches_df,
+        previous_prices=previous_prices,
+        snapshot_date=snapshot_date,
+        loaded_at=loaded_at,
+    )
+
+    _write_to_bq(headlines_df, TABLE_NAME_HEADLINES)
+    _write_to_bq(matches_df, TABLE_NAME_MATCHES)
+    _write_to_bq(baskets_df, TABLE_NAME_BASKETS)
+
+
+def _clamp_percent(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(max(1.0, min(99.0, value)), 2)
+
+
+def _date_from_unix(ts: float) -> date:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).date()
+
+
+def fetch_polymarket_history(yes_token_id: str, days: int) -> dict[date, float]:
+    """Return {date: yes_price_percent} for the last `days` days from CLOB prices-history."""
+    if not yes_token_id:
+        return {}
+    import time as _time
+    now = int(_time.time())
+    start_ts = now - (days + 2) * 86400  # buffer
+    try:
+        r = requests.get(
+            "https://clob.polymarket.com/prices-history",
+            params={"market": yes_token_id, "startTs": start_ts, "endTs": now, "fidelity": 1440},
+            timeout=20,
+        )
+        r.raise_for_status()
+        history = r.json().get("history") or []
+    except Exception as exc:
+        print(f"  Polymarket history fetch failed for {yes_token_id[:14]}...: {exc}")
+        return {}
+
+    # Keep the last point seen per UTC date.
+    by_date: dict[date, float] = {}
+    for pt in history:
+        try:
+            d = _date_from_unix(float(pt["t"]))
+            by_date[d] = round(float(pt["p"]) * 100, 2)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return by_date
+
+
+def fetch_kalshi_history(series_ticker: str, market_ticker: str, days: int) -> dict[date, float]:
+    """Return {date: yes_price_percent} for the last `days` days from Kalshi candlesticks."""
+    if not series_ticker or not market_ticker:
+        return {}
+    import time as _time
+    now = int(_time.time())
+    start_ts = now - (days + 2) * 86400
+    url = (
+        f"{KALSHI_BASE}/series/{series_ticker}/markets/{market_ticker}/candlesticks"
+    )
+    try:
+        r = requests.get(
+            url,
+            params={"start_ts": start_ts, "end_ts": now, "period_interval": 1440},
+            timeout=20,
+        )
+        if r.status_code == 429:
+            import time as _t
+            _t.sleep(2)
+            r = requests.get(
+                url,
+                params={"start_ts": start_ts, "end_ts": now, "period_interval": 1440},
+                timeout=20,
+            )
+        r.raise_for_status()
+        candles = r.json().get("candlesticks") or []
+    except Exception as exc:
+        print(f"  Kalshi history fetch failed for {market_ticker}: {exc}")
+        return {}
+
+    by_date: dict[date, float] = {}
+    for c in candles:
+        try:
+            d = _date_from_unix(float(c["end_period_ts"]))
+            close = float(c["price"]["close_dollars"])
+            by_date[d] = round(close * 100, 2)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return by_date
+
+
+def _backdate_with_real_history(
     headlines: pd.DataFrame,
-    snapshot_date: date,
-    loaded_at: datetime,
-) -> pd.DataFrame:
-    cloned = headlines.copy()
-    cloned["snapshot_date"] = snapshot_date
-    cloned["loaded_at"] = loaded_at
-    cloned["snapshot_story_id"] = cloned["headline_rank"].apply(
-        lambda rank: f"{snapshot_date.isoformat()}-{int(rank):02d}"
-    )
-    return cloned
-
-
-def _clone_matches_for_date(
     matches: pd.DataFrame,
-    headlines_for_date: pd.DataFrame,
+    history_by_market: dict[tuple[str, str], dict[date, float]],
     snapshot_date: date,
     loaded_at: datetime,
-    day_offset: int,
-) -> pd.DataFrame:
-    cloned = matches.copy()
-    story_lookup = {
-        row["story_id"]: row["snapshot_story_id"]
-        for row in headlines_for_date[["story_id", "snapshot_story_id"]].to_dict("records")
-    }
-    cloned["snapshot_date"] = snapshot_date
-    cloned["loaded_at"] = loaded_at
-    cloned["snapshot_story_id"] = cloned["story_id"].map(story_lookup)
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Clone headlines/matches to `snapshot_date`, overriding yes_price from real history.
 
-    def adjust_yes(row: pd.Series) -> Optional[float]:
-        base_price = row.get("yes_price")
-        if base_price is None or pd.isna(base_price):
-            return None
-        adjustment = _simulation_step(row["story_id"], row["source"]) * day_offset
-        return _clamp_percent(float(base_price) - adjustment)
-
-    cloned["yes_price"] = cloned.apply(adjust_yes, axis=1)
-    cloned["no_price"] = cloned["yes_price"].apply(
-        lambda price: None if price is None or pd.isna(price) else round(100 - price, 2)
+    history_by_market maps (source, market_id) -> {date: yes_price_pct}. If a market
+    has no entry for `snapshot_date`, we fall back to the nearest earlier-or-equal
+    date in the history; if none, the price stays at today's value (best-effort).
+    """
+    h = headlines.copy()
+    h["snapshot_date"] = snapshot_date
+    h["loaded_at"] = loaded_at
+    h["snapshot_story_id"] = h["story_id"].apply(
+        lambda sid: f"{snapshot_date.isoformat()}-{(sid or '')[:10]}"
     )
-    return cloned
+    sid_lookup = dict(zip(h["story_id"], h["snapshot_story_id"], strict=False))
+
+    m = matches.copy()
+    m["snapshot_date"] = snapshot_date
+    m["loaded_at"] = loaded_at
+    m["snapshot_story_id"] = m["story_id"].map(sid_lookup)
+
+    def lookup_price(row: pd.Series) -> float | None:
+        key = (row["source"], row["market_id"])
+        history = history_by_market.get(key) or {}
+        if not history:
+            return row.get("yes_price")
+        if snapshot_date in history:
+            return _clamp_percent(history[snapshot_date])
+        # Nearest prior date (so future dates aren't used).
+        prior_dates = [d for d in history if d <= snapshot_date]
+        if prior_dates:
+            return _clamp_percent(history[max(prior_dates)])
+        return row.get("yes_price")
+
+    m["yes_price"] = m.apply(lookup_price, axis=1)
+    m["no_price"] = m["yes_price"].apply(
+        lambda p: None if p is None or pd.isna(p) else round(100 - float(p), 2)
+    )
+    return h, m
 
 
 def run_simulated_snapshot_series(
     end_date: date,
-    limit: int = DEFAULT_HEADLINE_LIMIT,
+    top_movers: int = DEFAULT_TOP_MOVERS,
+    max_stories: int = DEFAULT_MAX_STORIES,
     simulate_days: int = 3,
 ) -> None:
-    loaded_at = datetime.now(timezone.utc)
-    headlines = get_top_headlines(snapshot_date=end_date, loaded_at=loaded_at, limit=limit)
-    if headlines.empty:
-        raise RuntimeError("NewsAPI returned no headlines.")
+    """Run the live ETL once for `end_date`, then write backdated snapshots for the
+    prior `simulate_days - 1` days using REAL historical prices from each platform's
+    history endpoint (Polymarket CLOB prices-history, Kalshi candlesticks).
+    """
+    loaded_at_base = datetime.now(timezone.utc)
 
-    matches = build_market_matches(headlines, snapshot_date=end_date, loaded_at=loaded_at)
-    dates = [end_date - timedelta(days=days_back) for days_back in range(simulate_days - 1, -1, -1)]
+    poly_movers = fetch_polymarket_movers(limit=top_movers)
+    kalshi_movers = fetch_kalshi_movers(limit=top_movers)
+    if not poly_movers and not kalshi_movers:
+        raise RuntimeError("No politics movers returned from either platform.")
+
+    print("Pairing markets across platforms with Gemini...")
+    pairs = pair_markets_across_platforms(poly_movers, kalshi_movers)
+    print(f"  {len(pairs)} valid pairs identified")
+
+    stories = _build_stories(pairs, poly_movers, kalshi_movers, max_stories)
+    print(f"Building {len(stories)} stories (paired + unpaired top movers)")
+
+    _generate_headlines_parallel(stories)
+
+    base_headlines = _stories_to_headlines(stories, end_date, loaded_at_base)
+    base_matches = _stories_to_matches(stories, end_date, loaded_at_base)
+
+    # Pre-fetch real history for each market in the cohort.
+    print(f"Fetching real {simulate_days}-day history per market...")
+    history_by_market: dict[tuple[str, str], dict[date, float]] = {}
+    for s in stories:
+        if s["poly"]:
+            key = ("polymarket", s["poly"]["market_id"])
+            history_by_market[key] = fetch_polymarket_history(
+                s["poly"].get("yes_token_id") or "", simulate_days
+            )
+        if s["kalshi"]:
+            key = ("kalshi", s["kalshi"]["market_id"])
+            history_by_market[key] = fetch_kalshi_history(
+                s["kalshi"].get("series_ticker") or "",
+                s["kalshi"].get("ticker") or s["kalshi"]["market_id"],
+                simulate_days,
+            )
+    poly_with_hist = sum(1 for k, v in history_by_market.items() if k[0] == "polymarket" and v)
+    kalshi_with_hist = sum(1 for k, v in history_by_market.items() if k[0] == "kalshi" and v)
+    print(f"  Polymarket: {poly_with_hist} markets returned history")
+    print(f"  Kalshi:     {kalshi_with_hist} markets returned history")
+
+    # Walk from oldest to newest so each day's "previous_prices" is the prior day.
+    dates = [end_date - timedelta(days=offset) for offset in range(simulate_days - 1, -1, -1)]
     previous_prices = pd.DataFrame(columns=["source", "market_id", "yes_price", "snapshot_date"])
 
-    for offset_index, snapshot_day in enumerate(dates):
-        day_offset = (end_date - snapshot_day).days
-        day_loaded_at = loaded_at + timedelta(seconds=offset_index)
-        day_headlines = _clone_headlines_for_date(headlines, snapshot_day, day_loaded_at)
-        day_matches = _clone_matches_for_date(
-            matches=matches,
-            headlines_for_date=day_headlines,
-            snapshot_date=snapshot_day,
-            loaded_at=day_loaded_at,
-            day_offset=day_offset,
-        )
+    for idx, day in enumerate(dates):
+        offset = (end_date - day).days
+        day_loaded_at = loaded_at_base + timedelta(seconds=idx)
+        if offset == 0:
+            day_headlines, day_matches = base_headlines, base_matches
+        else:
+            day_headlines, day_matches = _backdate_with_real_history(
+                base_headlines, base_matches, history_by_market, day, day_loaded_at,
+            )
+
         day_baskets = build_story_baskets(
             headlines=day_headlines,
             matches=day_matches,
             previous_prices=previous_prices,
-            snapshot_date=snapshot_day,
+            snapshot_date=day,
             loaded_at=day_loaded_at,
         )
 
+        print(f"Writing snapshot for {day} (offset {offset})...")
         _write_to_bq(day_headlines, TABLE_NAME_HEADLINES)
         _write_to_bq(day_matches, TABLE_NAME_MATCHES)
         _write_to_bq(day_baskets, TABLE_NAME_BASKETS)
@@ -873,31 +1221,12 @@ def run_simulated_snapshot_series(
         ].copy()
 
 
-def run_daily_snapshot(snapshot_date: date, limit: int = DEFAULT_HEADLINE_LIMIT) -> None:
-    loaded_at = datetime.now(timezone.utc)
-
-    headlines = get_top_headlines(snapshot_date=snapshot_date, loaded_at=loaded_at, limit=limit)
-    if headlines.empty:
-        raise RuntimeError("NewsAPI returned no headlines.")
-
-    previous_prices = get_previous_selected_prices(snapshot_date)
-    matches = build_market_matches(headlines, snapshot_date=snapshot_date, loaded_at=loaded_at)
-    baskets = build_story_baskets(
-        headlines=headlines,
-        matches=matches,
-        previous_prices=previous_prices,
-        snapshot_date=snapshot_date,
-        loaded_at=loaded_at,
-    )
-
-    _write_to_bq(headlines, TABLE_NAME_HEADLINES)
-    _write_to_bq(matches, TABLE_NAME_MATCHES)
-    _write_to_bq(baskets, TABLE_NAME_BASKETS)
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fetch top headlines, match them to prediction markets, and store daily baskets."
+        description=(
+            "Fetch trending politics markets, pair across platforms, "
+            "and store daily baskets."
+        )
     )
     parser.add_argument(
         "--date",
@@ -906,16 +1235,25 @@ def _parse_args() -> argparse.Namespace:
         help="Snapshot date in YYYY-MM-DD format.",
     )
     parser.add_argument(
-        "--limit",
+        "--top-movers",
         type=int,
-        default=DEFAULT_HEADLINE_LIMIT,
-        help="Number of top headlines to fetch.",
+        default=DEFAULT_TOP_MOVERS,
+        help="Top-N movers to fetch per platform.",
+    )
+    parser.add_argument(
+        "--max-stories",
+        type=int,
+        default=DEFAULT_MAX_STORIES,
+        help="Cap on number of stories written per snapshot.",
     )
     parser.add_argument(
         "--simulate-days",
         type=int,
         default=0,
-        help="If set, backfill a simulated series for this many days using the current top stories.",
+        help=(
+            "If >1, also write backdated snapshots for the prior N-1 days using "
+            "deterministic price perturbations. Useful to seed the trending chart."
+        ),
     )
     return parser.parse_args()
 
@@ -926,8 +1264,13 @@ if __name__ == "__main__":
     if args.simulate_days and args.simulate_days > 1:
         run_simulated_snapshot_series(
             end_date=snapshot_date,
-            limit=args.limit,
+            top_movers=args.top_movers,
+            max_stories=args.max_stories,
             simulate_days=args.simulate_days,
         )
-    else:
-        run_daily_snapshot(snapshot_date=snapshot_date, limit=args.limit)
+        sys.exit(0)
+    run_daily_snapshot(
+        snapshot_date=snapshot_date,
+        top_movers=args.top_movers,
+        max_stories=args.max_stories,
+    )
