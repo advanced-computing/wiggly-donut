@@ -4,13 +4,15 @@ Group: wiggly-donut
 ## 1) What dataset are you going to use? (include link)
 We want to build a live dashboard that tracks news-focused prediction markets across multiple platforms (starting with Kalshi and Polymarket). Prediction markets are useful because they aggregate public opinion into an implied probability, often producing surprisingly strong forecasts in practice. We want to create a cross-market “basket” signal instead of treating any one platform as ground truth. By combining probabilities across these sites, we get a more robust read of what expectations are shifting in real time.
 
-We want to do this because of the news relevance. Prediction prices move when new information arrives, so the biggest probability changes over the last week can act like a filter for current affairs on the things that have changed massively. Concretely, we’ll ingest market data from Kalshi’s public market-data endpoints and Polymarket’s read-only Gamma Markets API, compute “top movers,” and then link each moving market to the most relevant headlines via NewsAPI. 
+We want to do this because of the news relevance. Prediction prices move when new information arrives, so the biggest probability changes over the last week can act like a filter for current affairs on the things that have changed massively. Concretely, we’ll ingest a daily headline snapshot from NewsAPI.org, use Attena’s unified search API to find related Kalshi and Polymarket markets, compute a cross-platform basket, and rank stories by the size of their implied-probability changes.
 
-The News API: https://www.thenewsapi.com/
+The News API: https://newsapi.org/
 
 Kalshi API: https://docs.kalshi.com/welcome
 
 Polymarket API: https://docs.polymarket.com/quickstart/overview
+
+Attena API: https://attena-api.fly.dev/docs
 
 ## 2) What are your research question(s)? (specific + answerable)
 RQ1: Which 10–20 news-related prediction markets show the largest change in implied probability over the last 7 days (or last 24h), across a combined basket of prediction markets?
@@ -59,17 +61,44 @@ A major challenge we anticipate revolves around API rate limits. We still need t
 
 ## 7) updated Methodology
 
-**Stage 1 — News Ingestion**
-We pull the top 100 (scope decision) headlines from NewsAPI's top-stories endpoint, retaining the title, source, category, and publication timestamp. This snapshot is refreshed on each dashboard load.
+We invert the usual "news → market" matching. Instead, we start from the markets
+themselves: a market that has moved is, by definition, attached to a story.
 
-**Stage 2 — Market Matching**
-For each headline, we query both Kalshi and Polymarket APIs and retrieve open prediction markets. We match markets to headlines using keyword overlap on the market title. Each headline is assigned zero or more matching markets per platform.
+**Stage 1 — Trending markets per platform (politics & geopolitics only)**
+Once per day, we hit the Polymarket Gamma API and the Kalshi v2 API directly.
+For Polymarket we page through the highest-volume open markets and filter to
+politics/geopolitics by tag, series-slug, and keyword match. For Kalshi we list
+open events, keep those with `category` ∈ {Politics, World, Elections,
+Geopolitics}, and pull markets under those events. On each side we compute a
+24-hour change (Polymarket exposes `oneDayPriceChange`; Kalshi exposes both
+`last_price_dollars` and `previous_price_dollars`) and keep the top ~50 by
+absolute change with a $1k 24h-volume floor.
 
-**Stage 3 — Probability Aggregation**
-For headlines with at least one match on each platform, we compute a cross-market average implied probability: the mean of all matched market "yes" probabilities across Kalshi and Polymarket.
+**Stage 2 — Cross-platform pairing with strict timeframe alignment**
+A single Gemini call takes the two top-50 lists and returns pairs that measure
+the same outcome. The prompt rejects pairs that disagree on resolution timeframe
+("by 2027" vs "by June 2026"), threshold ("S&P > 6000" vs "S&P > 6500"),
+direction (yes vs no), or scope ("next president" vs "GOP nominee"). Close
+times are passed in to enforce timeframe agreement.
 
-**Stage 4 — Dashboard Presentation**
-The Streamlit dashboard displays the 100 stories ranked by their cross-platform average probability. Users can filter by topic category or platform. Clicking a story reveals the matched markets, individual platform probabilities, and relevant headlines.
+**Stage 3 — Story generation via grounded search**
+For each paired (or unpaired top-mover) story, Gemini is called again with
+Google Search grounding to find the most relevant news article from the last
+seven days. The returned title, description, source, and URL are stored as the
+"headline" for that market move.
+
+**Stage 4 — Basket aggregation**
+For each story we compute a basket as the mean of the Polymarket and Kalshi
+yes-prices when both exist (paired story), or the single-platform yes-price
+otherwise. The 1-day basket change is computed against the most recent prior
+snapshot of those same markets in BigQuery.
+
+**Stage 5 — Dashboard**
+The Streamlit homepage is a 2-panel view. The top panel is a multi-line chart
+of the most-trending politics/geopolitics markets over the last seven days. The
+bottom panel is the per-story drill-down with metrics and the Polymarket/Kalshi
+detail. Data flows entirely through three BigQuery tables —
+`daily_headlines`, `daily_market_matches`, `daily_story_baskets`.
 
 
 
@@ -113,18 +142,29 @@ client_x509_cert_url = "your-cert-url"
 universe_domain = "googleapis.com"
 ```
 
-**3. Populate Your BigQuery Database**
-Before running the dashboard, fetch the latest probabilities from Polymarket and upload them into your BigQuery dataset.
+**3. (No news API key needed)**
+The pipeline now reads directly from the public Polymarket Gamma API and the
+Kalshi v2 API — neither requires an API key. News headlines are generated by
+Gemini using Google Search grounding via your existing GCP service account.
 
-* Open `load_bq.py` and modify `PROJECT_ID`, `DATASET_ID`, and `TABLE_NAME` at the top of the file to match your GCP project destination.
-* Run the script to ingest current Polymarket odds into BigQuery:
+**4. Populate Your BigQuery Database**
+Before running the dashboard, create the latest daily snapshot in BigQuery.
+
+* Open `load_bq.py` and modify `PROJECT_ID` and `DATASET_ID` if your GCP destination is different.
+* Run the daily batch script:
 ```bash
 python load_bq.py
 ```
 
-**4. Launch the Streamlit Dashboard**
-Now that the data is loaded into BigQuery, start:
+This stores three daily tables in BigQuery:
+
+* `daily_headlines`
+* `daily_market_matches`
+* `daily_story_baskets`
+
+**5. Launch the Streamlit Dashboard**
+Now that the daily snapshot is loaded into BigQuery, start:
 ```bash
-streamlit run streamlit_app.py
+streamlit run Prediction_Market_Ranking.py
 ```
 A browser tab will open automatically at `http://localhost:8501`.
